@@ -1,0 +1,369 @@
+// Database migrations. Applied in order, tracked in schema_migrations.
+// Add new migrations to the end of the list; never edit an applied one.
+export const migrations: { id: string; sql: string }[] = [
+{ id: '001_init', sql: String.raw`
+-- remail schema v1
+-- All timestamps are timestamptz (UTC). All ids are bigserial unless noted.
+
+create extension if not exists pgcrypto;
+
+-- ── Organisation & identity ────────────────────────────────────────────────
+create table if not exists organisations (
+  id              bigserial primary key,
+  name            text not null,
+  internal_domains text[] not null default '{}',
+  settings        jsonb not null default '{}'::jsonb,
+  created_at      timestamptz not null default now()
+);
+
+create table if not exists users (
+  id              bigserial primary key,
+  org_id          bigint not null references organisations(id) on delete cascade,
+  email           text not null,
+  full_name       text not null default '',
+  role            text not null default 'viewer' check (role in ('admin','manager','analyst','viewer')),
+  auth_provider   text not null default 'local' check (auth_provider in ('local','ravity')),
+  external_id     text,
+  password_hash   text,
+  is_active       boolean not null default true,
+  all_mailboxes   boolean not null default false,
+  timezone        text not null default 'America/Toronto',
+  notify_email    boolean not null default true,
+  last_login_at   timestamptz,
+  created_at      timestamptz not null default now(),
+  updated_at      timestamptz not null default now()
+);
+create unique index if not exists users_email_uq on users (lower(email));
+
+create table if not exists sessions (
+  id              uuid primary key default gen_random_uuid(),
+  user_id         bigint not null references users(id) on delete cascade,
+  created_at      timestamptz not null default now(),
+  expires_at      timestamptz not null,
+  revoked_at      timestamptz,
+  ip_address      text,
+  user_agent      text
+);
+create index if not exists sessions_user_idx on sessions (user_id);
+
+create table if not exists password_resets (
+  id              bigserial primary key,
+  user_id         bigint not null references users(id) on delete cascade,
+  token_hash      text not null,
+  expires_at      timestamptz not null,
+  used_at         timestamptz,
+  created_at      timestamptz not null default now()
+);
+
+-- ── Mailboxes & connectors ─────────────────────────────────────────────────
+create table if not exists mailboxes (
+  id              bigserial primary key,
+  org_id          bigint not null references organisations(id) on delete cascade,
+  provider        text not null check (provider in ('microsoft','microsoft_app','gmail','upload','demo')),
+  address         text not null,
+  display_name    text not null default '',
+  -- encrypted OAuth refresh token (AES-256-GCM, base64) for delegated connections
+  credentials_enc text,
+  status          text not null default 'active' check (status in ('active','paused','error','pending')),
+  last_error      text,
+  sync_state      jsonb not null default '{}'::jsonb,   -- delta links / history ids per folder
+  backfill_days   int not null default 30,
+  last_synced_at  timestamptz,
+  messages_synced bigint not null default 0,
+  created_by      bigint references users(id),
+  created_at      timestamptz not null default now()
+);
+create unique index if not exists mailboxes_org_addr_uq on mailboxes (org_id, provider, lower(address));
+
+create table if not exists user_mailboxes (
+  user_id         bigint not null references users(id) on delete cascade,
+  mailbox_id      bigint not null references mailboxes(id) on delete cascade,
+  primary key (user_id, mailbox_id)
+);
+
+-- ── Customers ──────────────────────────────────────────────────────────────
+create table if not exists customers (
+  id              bigserial primary key,
+  org_id          bigint not null references organisations(id) on delete cascade,
+  name            text not null,
+  domains         text[] not null default '{}',
+  tier            text not null default 'standard' check (tier in ('strategic','key','standard')),
+  account_owner   text,
+  notes           text,
+  health_score    int,
+  health_status   text check (health_status in ('satisfied','neutral','at_risk','dissatisfied')),
+  health_trend    int not null default 0,
+  last_contact_at timestamptz,
+  auto_created    boolean not null default true,
+  created_at      timestamptz not null default now()
+);
+create index if not exists customers_org_idx on customers (org_id);
+create index if not exists customers_domains_idx on customers using gin (domains);
+
+create table if not exists contacts (
+  id              bigserial primary key,
+  org_id          bigint not null references organisations(id) on delete cascade,
+  customer_id     bigint references customers(id) on delete set null,
+  email           text not null,
+  name            text not null default '',
+  created_at      timestamptz not null default now()
+);
+create unique index if not exists contacts_org_email_uq on contacts (org_id, lower(email));
+
+-- ── Conversations & emails ─────────────────────────────────────────────────
+create table if not exists conversations (
+  id                 bigserial primary key,
+  org_id             bigint not null references organisations(id) on delete cascade,
+  customer_id        bigint references customers(id) on delete set null,
+  subject            text not null default '',
+  normalized_subject text not null default '',
+  first_message_at   timestamptz,
+  last_message_at    timestamptz,
+  last_inbound_at    timestamptz,
+  last_outbound_at   timestamptz,
+  message_count      int not null default 0,
+  inbound_count      int not null default 0,
+  duplicate_count    int not null default 0,
+  mailbox_ids        bigint[] not null default '{}',
+  participants       text[] not null default '{}',
+  awaiting_reply     boolean not null default false,
+  first_response_minutes int,
+  -- analysis
+  summary            text,
+  sentiment          text check (sentiment in ('positive','neutral','negative')),
+  sentiment_score    real,
+  rag                text check (rag in ('red','amber','green')),
+  rag_reason         text,
+  customer_state     text check (customer_state in ('satisfied','neutral','at_risk','dissatisfied')),
+  urgency            text check (urgency in ('low','medium','high','critical')),
+  escalation_risk    int,
+  priority_score     int not null default 0,
+  categories         text[] not null default '{}',
+  topics             text[] not null default '{}',
+  entities           jsonb not null default '{}'::jsonb,
+  suggested_reply    text,
+  analysis_model     text,
+  analysed_at        timestamptz,
+  needs_analysis     boolean not null default true,
+  -- workflow
+  status             text not null default 'open' check (status in ('open','in_progress','resolved','ignored')),
+  assignee_id        bigint references users(id) on delete set null,
+  resolved_at        timestamptz,
+  created_at         timestamptz not null default now(),
+  updated_at         timestamptz not null default now()
+);
+create index if not exists conv_org_last_idx on conversations (org_id, last_message_at desc);
+create index if not exists conv_customer_idx on conversations (customer_id);
+create index if not exists conv_rag_idx on conversations (org_id, rag);
+create index if not exists conv_needs_analysis_idx on conversations (needs_analysis) where needs_analysis;
+create index if not exists conv_norm_subject_idx on conversations (org_id, normalized_subject);
+
+create table if not exists conversation_keys (
+  conversation_id bigint not null references conversations(id) on delete cascade,
+  key             text not null,
+  primary key (key)
+);
+create index if not exists conv_keys_conv_idx on conversation_keys (conversation_id);
+
+create table if not exists emails (
+  id                   bigserial primary key,
+  org_id               bigint not null references organisations(id) on delete cascade,
+  mailbox_id           bigint not null references mailboxes(id) on delete cascade,
+  conversation_id      bigint references conversations(id) on delete set null,
+  provider_message_id  text not null,
+  internet_message_id  text,
+  provider_thread_id   text,
+  in_reply_to          text,
+  dedup_key            text not null,
+  content_hash         text not null,
+  is_duplicate         boolean not null default false,
+  duplicate_of         bigint references emails(id) on delete set null,
+  direction            text not null check (direction in ('inbound','outbound','internal')),
+  from_address         text not null default '',
+  from_name            text not null default '',
+  to_addresses         text[] not null default '{}',
+  cc_addresses         text[] not null default '{}',
+  subject              text not null default '',
+  body_text            text not null default '',
+  body_clean           text not null default '',
+  snippet              text not null default '',
+  has_attachments      boolean not null default false,
+  importance           text,
+  web_link             text,
+  sent_at              timestamptz not null,
+  sentiment            text check (sentiment in ('positive','neutral','negative')),
+  sentiment_score      real,
+  created_at           timestamptz not null default now()
+);
+create unique index if not exists emails_mailbox_msg_uq on emails (mailbox_id, provider_message_id);
+create index if not exists emails_dedup_idx on emails (org_id, dedup_key);
+create index if not exists emails_content_idx on emails (org_id, content_hash);
+create index if not exists emails_conv_idx on emails (conversation_id, sent_at);
+create index if not exists emails_org_sent_idx on emails (org_id, sent_at desc);
+create index if not exists emails_imid_idx on emails (org_id, internet_message_id);
+
+-- ── Insights ───────────────────────────────────────────────────────────────
+create table if not exists issues (
+  id              bigserial primary key,
+  org_id          bigint not null references organisations(id) on delete cascade,
+  conversation_id bigint not null references conversations(id) on delete cascade,
+  customer_id     bigint references customers(id) on delete set null,
+  category        text not null,
+  description     text not null,
+  severity        text not null default 'medium' check (severity in ('low','medium','high','critical')),
+  detected_at     timestamptz not null default now()
+);
+create index if not exists issues_org_cat_idx on issues (org_id, category, detected_at);
+create index if not exists issues_conv_idx on issues (conversation_id);
+
+create table if not exists action_items (
+  id              bigserial primary key,
+  org_id          bigint not null references organisations(id) on delete cascade,
+  conversation_id bigint not null references conversations(id) on delete cascade,
+  customer_id     bigint references customers(id) on delete set null,
+  description     text not null,
+  owner_side      text not null default 'us' check (owner_side in ('us','customer')),
+  owner_name      text,
+  is_commitment   boolean not null default false,
+  due_date        date,
+  status          text not null default 'open' check (status in ('open','done','dismissed')),
+  assignee_id     bigint references users(id) on delete set null,
+  fingerprint     text not null,
+  source_email_id bigint references emails(id) on delete set null,
+  created_at      timestamptz not null default now(),
+  completed_at    timestamptz
+);
+create unique index if not exists actions_fp_uq on action_items (conversation_id, fingerprint);
+create index if not exists actions_org_status_idx on action_items (org_id, status, due_date);
+
+create table if not exists customer_health_daily (
+  customer_id     bigint not null references customers(id) on delete cascade,
+  day             date not null,
+  health_score    int not null,
+  negative_pct    real not null default 0,
+  red_count       int not null default 0,
+  email_count     int not null default 0,
+  primary key (customer_id, day)
+);
+
+create table if not exists conversation_notes (
+  id              bigserial primary key,
+  conversation_id bigint not null references conversations(id) on delete cascade,
+  user_id         bigint references users(id) on delete set null,
+  body            text not null,
+  created_at      timestamptz not null default now()
+);
+
+-- ── Alerts ─────────────────────────────────────────────────────────────────
+create table if not exists alert_rules (
+  id              bigserial primary key,
+  org_id          bigint not null references organisations(id) on delete cascade,
+  name            text not null,
+  enabled         boolean not null default true,
+  rule_type       text not null check (rule_type in ('rag_red','negative_key_customer','escalation_risk','keyword','sla_breach','health_drop')),
+  params          jsonb not null default '{}'::jsonb,
+  severity        text not null default 'high' check (severity in ('medium','high','critical')),
+  channels        text[] not null default '{in_app,email}',
+  recipients      text[] not null default '{}',
+  escalate_after_minutes int,
+  escalation_recipients  text[] not null default '{}',
+  created_at      timestamptz not null default now()
+);
+
+create table if not exists alerts (
+  id              bigserial primary key,
+  org_id          bigint not null references organisations(id) on delete cascade,
+  rule_id         bigint references alert_rules(id) on delete set null,
+  conversation_id bigint references conversations(id) on delete cascade,
+  customer_id     bigint references customers(id) on delete set null,
+  severity        text not null,
+  title           text not null,
+  body            text not null default '',
+  dedup_key       text not null,
+  status          text not null default 'open' check (status in ('open','acknowledged','resolved')),
+  escalation_level int not null default 0,
+  escalated_at    timestamptz,
+  acknowledged_by bigint references users(id) on delete set null,
+  acknowledged_at timestamptz,
+  delivered       jsonb not null default '{}'::jsonb,
+  created_at      timestamptz not null default now()
+);
+create unique index if not exists alerts_dedup_uq on alerts (org_id, dedup_key);
+create index if not exists alerts_org_status_idx on alerts (org_id, status, created_at desc);
+
+-- ── Reports ────────────────────────────────────────────────────────────────
+create table if not exists report_schedules (
+  id              bigserial primary key,
+  org_id          bigint not null references organisations(id) on delete cascade,
+  name            text not null,
+  frequency       text not null check (frequency in ('daily','weekly','monthly')),
+  hour_utc        int not null default 7 check (hour_utc between 0 and 23),
+  day_of_week     int default 1 check (day_of_week between 0 and 6),
+  day_of_month    int default 1 check (day_of_month between 1 and 28),
+  recipients      text[] not null default '{}',
+  filters         jsonb not null default '{}'::jsonb,
+  enabled         boolean not null default true,
+  last_run_at     timestamptz,
+  created_by      bigint references users(id),
+  created_at      timestamptz not null default now()
+);
+
+create table if not exists report_runs (
+  id              bigserial primary key,
+  org_id          bigint not null references organisations(id) on delete cascade,
+  schedule_id     bigint references report_schedules(id) on delete set null,
+  period_start    timestamptz not null,
+  period_end      timestamptz not null,
+  html            text not null,
+  summary         jsonb not null default '{}'::jsonb,
+  recipients      text[] not null default '{}',
+  delivery_status text not null default 'pending',
+  created_at      timestamptz not null default now()
+);
+
+-- ── Ops ────────────────────────────────────────────────────────────────────
+create table if not exists sync_runs (
+  id              bigserial primary key,
+  mailbox_id      bigint references mailboxes(id) on delete cascade,
+  started_at      timestamptz not null default now(),
+  finished_at     timestamptz,
+  fetched         int not null default 0,
+  inserted        int not null default 0,
+  duplicates      int not null default 0,
+  error           text
+);
+
+create table if not exists audit_log (
+  id              bigserial primary key,
+  org_id          bigint,
+  user_id         bigint references users(id) on delete set null,
+  user_email      text,
+  action          text not null,
+  entity_type     text,
+  entity_id       text,
+  details         jsonb not null default '{}'::jsonb,
+  ip_address      text,
+  user_agent      text,
+  created_at      timestamptz not null default now()
+);
+create index if not exists audit_org_time_idx on audit_log (org_id, created_at desc);
+
+create table if not exists ai_usage (
+  id              bigserial primary key,
+  org_id          bigint,
+  model           text not null,
+  input_tokens    int not null default 0,
+  output_tokens   int not null default 0,
+  purpose         text not null,
+  created_at      timestamptz not null default now()
+);
+
+create table if not exists oauth_states (
+  state           text primary key,
+  user_id         bigint references users(id) on delete cascade,
+  provider        text not null,
+  payload         jsonb not null default '{}'::jsonb,
+  created_at      timestamptz not null default now()
+);
+` },
+];

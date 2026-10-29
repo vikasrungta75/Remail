@@ -1,0 +1,60 @@
+# Deploying remail to Netlify
+
+Setup takes about 15 minutes. You need a Netlify account, a Postgres database and the GitHub repo `vikasrungta75/remail`.
+
+## 1. Create the Netlify site
+
+1. In Netlify go to **Add new site → Import an existing project → GitHub** and pick `vikasrungta75/remail`.
+2. The build settings come from `netlify.toml`. Leave them as they are:
+   * Build command: `npm run migrate && npm run build:web`
+   * Publish directory: `dist`
+   * Functions directory: `netlify/functions`
+3. Don't deploy yet. Add the database and environment variables first.
+
+## 2. Add Postgres
+
+Choose one:
+
+* **Netlify DB (simplest):** in the site, open **Extensions → Neon → Add database**, or run `npx netlify db init`. Netlify sets `NETLIFY_DATABASE_URL` for you, and remail reads it automatically.
+* **Neon, Supabase, RDS or any other Postgres 14+:** create a database and set `DATABASE_URL` to the connection string, including `?sslmode=require`.
+
+Tables are created automatically on the first build (`npm run migrate`) and checked again on the first API call.
+
+## 3. Environment variables
+
+Open **Site configuration → Environment variables** and add the following. The full list is in `.env.example`.
+
+| Variable | Value |
+| --- | --- |
+| `JWT_SECRET` | output of `openssl rand -hex 32` |
+| `ENCRYPTION_KEY` | output of `openssl rand -hex 32` (keep it safe: changing it invalidates connected mailboxes) |
+| `INTERNAL_API_SECRET` | output of `openssl rand -hex 24` |
+| `ADMIN_EMAIL` / `ADMIN_PASSWORD` / `ADMIN_NAME` | first administrator (only used when the database has no users) |
+| `ORG_NAME` | `Wheel King TransHaul` |
+| `INTERNAL_DOMAINS` | Wheel King's email domains, comma separated |
+| `ANTHROPIC_API_KEY` | from console.anthropic.com (or configure Azure OpenAI) |
+| `APP_URL` | only if you use a custom domain, e.g. `https://remail.ravity.ai` |
+
+Optional variables:
+* **Ravity sign-in like rfleet:** `RAVITY_IAM_URL` (the same value as rfleet's `REACT_APP_SERVICE_URL`) and `RAVITY_SPACE_NAME`.
+* **Microsoft 365:** `MS_TENANT_ID`, `MS_CLIENT_ID`, `MS_CLIENT_SECRET` (see MICROSOFT_365_SETUP.md).
+* **Gmail:** `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` (see GMAIL_SETUP.md).
+* **Email delivery for alerts and reports:** `SMTP_*`, `RESEND_API_KEY` or `MS_SENDER_MAILBOX`.
+* **Chat alerts:** `TEAMS_WEBHOOK_URL`, `SLACK_WEBHOOK_URL`.
+
+## 4. Deploy
+
+Trigger a deploy. Once it finishes:
+
+1. Open the site and sign in with `ADMIN_EMAIL` / `ADMIN_PASSWORD`.
+2. Go to **Admin → Mailboxes** and either connect a mailbox or select **Load demo** to explore.
+3. Under **Functions** in Netlify, confirm that `scheduler` runs every 5 minutes and that `worker-background` logs `[worker] done`.
+
+## Sign-in modes
+
+remail supports the same sign-in mechanism as rfleet. With `RAVITY_IAM_URL` set, it calls Ravity IAM's `getCustomerSpaces`, then `authenticateuser`, then `getUserInfoByToken`, exactly as rfleet does. It then issues its own signed session, stored client-side under the `token` key just like rfleet. The first IAM user (or any address in `BOOTSTRAP_ADMIN_EMAILS`) becomes admin. Local password accounts keep working alongside it (`AUTH_MODE=both`).
+
+## Scaling
+
+* About 500 emails a day across 5 mailboxes needs roughly 250 conversation analyses a day. Each worker run processes about 400 messages per mailbox per pass and resumes large backfills across runs.
+* To handle more volume: increase the database tier, shorten the scheduler interval, or add workers per mailbox. The schema is multi-tenant (`org_id` on every table), so more operating companies can share one deployment.

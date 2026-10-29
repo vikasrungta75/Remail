@@ -1,0 +1,141 @@
+import { useEffect, useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
+import { useNavigate, useSearchParams } from 'react-router-dom';
+import { MdSearch, MdAttachFile, MdContentCopy, MdChevronLeft, MdChevronRight } from 'react-icons/md';
+import { api, qs } from '../api/client';
+import { useFilters } from '../contexts/FilterContext';
+import FilterBar from '../components/FilterBar';
+import { Card, Empty, Loader, PageHead, RagDot, SentimentBadge, StatusBadge, TierBadge, UrgencyBadge } from '../components/ui';
+import { ago, catLabel, hoursSince } from '../lib/format';
+
+const SORTS = [
+	{ v: 'priority', l: 'Priority' },
+	{ v: 'recent', l: 'Most recent' },
+	{ v: 'oldest_waiting', l: 'Longest waiting' },
+	{ v: 'risk', l: 'Escalation risk' },
+	{ v: 'sentiment', l: 'Most negative' },
+];
+
+export function ConversationList({ preset = {}, defaultSort = 'priority', showSearch = true }: { preset?: Record<string, unknown>; defaultSort?: string; showSearch?: boolean }) {
+	const { params } = useFilters();
+	const nav = useNavigate();
+	const [sp, setSp] = useSearchParams();
+	const [q, setQ] = useState(sp.get('q') || '');
+	const [sort, setSort] = useState(defaultSort);
+	const [awaiting, setAwaiting] = useState(false);
+	const [mine, setMine] = useState(false);
+	const [page, setPage] = useState(0);
+	const limit = 40;
+	useEffect(() => setQ(sp.get('q') || ''), [sp]);
+	useEffect(() => setPage(0), [params, q, sort, awaiting, mine]);
+
+	const query = { ...params, ...preset, q: sp.get('q') || undefined, sort, awaiting: awaiting || undefined, assignee: mine ? 'me' : undefined, limit, offset: page * limit };
+	const { data, isLoading } = useQuery({ queryKey: ['conversations', query], queryFn: () => api(`/conversations${qs(query)}`), refetchInterval: 30_000 });
+
+	return (
+		<>
+			<div className="row-between wrap mb-16">
+				{showSearch && (
+					<form className="row" style={{ position: 'relative' }} onSubmit={(e) => { e.preventDefault(); setSp(q ? { q } : {}); }}>
+						<MdSearch style={{ position: 'absolute', left: 10, color: 'var(--text-3)' }} />
+						<input className="input" style={{ paddingLeft: 32, width: 320 }} placeholder="Search subject, summary, customer or email text" value={q} onChange={(e) => setQ(e.target.value)} />
+						{sp.get('q') && <button type="button" className="btn ghost sm" onClick={() => { setQ(''); setSp({}); }}>Clear</button>}
+					</form>
+				)}
+				<div className="row wrap">
+					<label className="row small"><input type="checkbox" checked={awaiting} onChange={(e) => setAwaiting(e.target.checked)} style={{ accentColor: 'var(--pink)' }} /> Awaiting reply</label>
+					<label className="row small"><input type="checkbox" checked={mine} onChange={(e) => setMine(e.target.checked)} style={{ accentColor: 'var(--pink)' }} /> Assigned to me</label>
+					<select className="input" style={{ width: 180 }} value={sort} onChange={(e) => setSort(e.target.value)} aria-label="Sort">
+						{SORTS.map((s) => <option key={s.v} value={s.v}>Sort: {s.l}</option>)}
+					</select>
+				</div>
+			</div>
+			<Card flush>
+				{isLoading ? <Loader /> : !data?.rows?.length ? <Empty text="No conversations match these filters" /> : (
+					<div className="table-wrap">
+						<table className="table">
+							<thead>
+								<tr>
+									<th style={{ width: 28 }} />
+									<th>Customer and subject</th>
+									<th>Summary</th>
+									<th>Sentiment</th>
+									<th>Status</th>
+									<th className="num">Risk</th>
+									<th>Last activity</th>
+								</tr>
+							</thead>
+							<tbody>
+								{data.rows.map((c: any) => (
+									<tr key={c.id} className="click" onClick={() => nav(`/conversations/${c.id}`)}>
+										<td><RagDot rag={c.rag} /></td>
+										<td style={{ minWidth: 240, maxWidth: 320 }}>
+											<div className="row" style={{ fontWeight: 700 }}>
+												<span className="truncate">{c.customer_name || 'Unknown'}</span> <TierBadge tier={c.customer_tier} />
+											</div>
+											<div className="truncate muted">{c.subject || '(no subject)'}</div>
+											<div className="row wrap mt-8 gap-4">
+												{(c.categories || []).slice(0, 3).map((x: string) => <span key={x} className="chip">{catLabel(x)}</span>)}
+											</div>
+										</td>
+										<td style={{ maxWidth: 420 }}>
+											<div className="small clamp-2 muted">{c.summary || <span className="faint">Analysis pending</span>}</div>
+											<div className="row wrap mt-8 gap-4">
+												<UrgencyBadge u={c.urgency} />
+												{c.awaiting_reply && c.status !== 'resolved' && <span className="badge amber">Awaiting reply {Math.round(hoursSince(c.last_inbound_at))}h</span>}
+												{c.open_actions > 0 && <span className="badge blue">{c.open_actions} action{c.open_actions > 1 ? 's' : ''}</span>}
+											</div>
+										</td>
+										<td><SentimentBadge s={c.sentiment} score={c.sentiment_score} /></td>
+										<td>
+											<StatusBadge s={c.status} />
+											{c.assignee_name && <div className="xs faint mt-8">{c.assignee_name}</div>}
+										</td>
+										<td className="num"><b>{c.escalation_risk ?? '–'}</b></td>
+										<td className="nowrap small">
+											{ago(c.last_message_at)}
+											<div className="xs faint row gap-4">
+												{c.message_count} msg{c.message_count > 1 ? 's' : ''}
+												{c.duplicate_count > 0 && <span title="Duplicates removed"><MdContentCopy /> {c.duplicate_count}</span>}
+												{c.has_attachments && <MdAttachFile />}
+											</div>
+										</td>
+									</tr>
+								))}
+							</tbody>
+						</table>
+					</div>
+				)}
+				{data?.total > limit && (
+					<div className="row-between" style={{ padding: '12px 20px', borderTop: '1px solid var(--border-2)' }}>
+						<span className="small faint">{page * limit + 1}–{Math.min((page + 1) * limit, data.total)} of {data.total}</span>
+						<div className="row">
+							<button className="btn sm" disabled={page === 0} onClick={() => setPage(page - 1)}><MdChevronLeft /> Previous</button>
+							<button className="btn sm" disabled={(page + 1) * limit >= data.total} onClick={() => setPage(page + 1)}>Next <MdChevronRight /></button>
+						</div>
+					</div>
+				)}
+			</Card>
+		</>
+	);
+}
+
+export default function Conversations() {
+	return (
+		<>
+			<PageHead kw="Conversations" rest="across all mailboxes" sub="Threads are reconstructed across mailboxes and duplicates are removed before analysis." />
+			<FilterBar show={['customer', 'mailbox', 'sentiment', 'rag', 'status', 'category', 'tier']} />
+			<ConversationList />
+		</>
+	);
+}
+
+export function CriticalIssues() {
+	return (
+		<>
+			<PageHead kw="Critical" rest="issues" sub="Open red and amber conversations ranked by priority: rating, escalation risk, customer tier, urgency and time waiting." />
+			<FilterBar show={['customer', 'mailbox', 'category', 'tier']} />
+			<ConversationList preset={{ rag: ['red', 'amber'], status: ['open', 'in_progress'] }} />
+		</>
+	);
+}
