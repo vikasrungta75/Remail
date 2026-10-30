@@ -93,7 +93,7 @@ The look and the sign-in come from **rfleet.ai**. You sign in with your Ravity a
   * `scheduler`: runs every 5 minutes
   * `worker-background`: up to 15 minutes per run
 * **Database:** PostgreSQL. Migrations run automatically from `server/migrations.ts`.
-* **AI:** Anthropic Claude by default, or Azure OpenAI, or any OpenAI-compatible API. A fleet-tuned rules engine is the fallback, so everything works without an AI key.
+* **AI:** Google Gemini (`gemini-3.8-flash`) by default, with structured JSON output. Claude, Azure OpenAI or any OpenAI-compatible API are also supported. A fleet-tuned rules engine is the fallback, so everything works without an AI key.
 
 ## Sign-in (same as rfleet)
 
@@ -120,6 +120,8 @@ npm test                        # pipeline tests (use an empty test database)
 ```
 
 ## Deploy
+
+* **Start here: [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md)**, step by step from GitHub to Netlify to testing with your own Microsoft mailbox and Gemini.
 
 * [docs/DEPLOY.md](docs/DEPLOY.md): Netlify and Postgres.
 * [docs/MICROSOFT_365_SETUP.md](docs/MICROSOFT_365_SETUP.md): Microsoft sign-in, connecting your own Outlook for testing, and Wheel King organisation consent.

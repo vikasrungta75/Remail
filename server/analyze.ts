@@ -12,7 +12,8 @@ const MAX_MESSAGES = 14;
 
 export async function analysePending(orgId: number, limit = 25, deadline = Date.now() + 60_000) {
 	const rows = await q<{ id: number }>(
-		`select id from conversations where org_id=$1 and needs_analysis and message_count > 0
+		`select id from conversations where org_id=$1 and message_count > 0
+		   and (needs_analysis or (analysis_model like '%(fallback)%' and analysed_at < now() - interval '30 minutes'))
 		 order by last_message_at desc limit $2`,
 		[orgId, limit],
 	);

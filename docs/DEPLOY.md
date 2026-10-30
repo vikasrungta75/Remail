@@ -32,7 +32,7 @@ Open **Site configuration → Environment variables** and add the following. The
 | `ADMIN_EMAIL` / `ADMIN_PASSWORD` / `ADMIN_NAME` | first administrator (only used when the database has no users) |
 | `ORG_NAME` | `Wheel King TransHaul` |
 | `INTERNAL_DOMAINS` | Wheel King's email domains, comma separated |
-| `ANTHROPIC_API_KEY` | from console.anthropic.com (or configure Azure OpenAI) |
+| `GEMINI_API_KEY` | from aistudio.google.com/apikey (model `gemini-3.8-flash` by default; Claude, Azure OpenAI and OpenAI are also supported) |
 | `APP_URL` | only if you use a custom domain, e.g. `https://remail.ravity.ai` |
 
 Optional variables:

@@ -1,17 +1,20 @@
 /**
- * LLM providers. Anthropic Claude (default) or any OpenAI-compatible endpoint, including
- * Azure OpenAI (for customers who need processing inside their own Azure tenant).
+ * LLM providers: Google Gemini (default when GEMINI_API_KEY is set), Anthropic Claude, or any
+ * OpenAI-compatible endpoint including Azure OpenAI (for processing inside a customer's Azure tenant).
  * Falls back to the deterministic analyser when nothing is configured or a call fails.
  */
 import { q } from '../db';
 import { heuristicAnalyse } from './heuristic';
 import { ANALYSIS_SCHEMA, BUSINESS_CATEGORIES, CATEGORIES, PROPOSAL_STAGES, type Analysis, type ThreadInput } from './types';
 
-export type Provider = 'anthropic' | 'openai' | 'azure' | 'heuristic';
+export type Provider = 'gemini' | 'anthropic' | 'openai' | 'azure' | 'heuristic';
+
+const geminiKey = () => process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '';
 
 export function aiProvider(): Provider {
 	const p = (process.env.AI_PROVIDER || '').toLowerCase();
 	if (p === 'heuristic') return 'heuristic';
+	if ((p === 'gemini' || !p) && geminiKey()) return 'gemini';
 	if ((p === 'anthropic' || !p) && process.env.ANTHROPIC_API_KEY) return 'anthropic';
 	if ((p === 'azure' || !p) && process.env.AZURE_OPENAI_ENDPOINT && process.env.AZURE_OPENAI_API_KEY) return 'azure';
 	if ((p === 'openai' || !p) && process.env.OPENAI_API_KEY) return 'openai';
@@ -20,6 +23,7 @@ export function aiProvider(): Provider {
 
 export function aiModel(): string {
 	switch (aiProvider()) {
+		case 'gemini': return process.env.GEMINI_MODEL || 'gemini-3.8-flash';
 		case 'anthropic': return process.env.ANTHROPIC_MODEL || 'claude-haiku-5-5';
 		case 'azure': return process.env.AZURE_OPENAI_DEPLOYMENT || 'gpt-4o-mini';
 		case 'openai': return process.env.OPENAI_MODEL || 'gpt-4o-mini';
@@ -76,6 +80,71 @@ async function anthropicCall(body: any) {
 	const data: any = await res.json();
 	if (!res.ok) throw new Error(`Anthropic ${res.status}: ${data?.error?.message || 'error'}`);
 	return data;
+}
+
+/**
+ * Gemini generateContent with JSON output. When a schema is given it is enforced with
+ * responseJsonSchema; if the model/API version rejects that field we retry with JSON mode only
+ * (the schema is also described in the prompt), so a Gemini API change never breaks analysis.
+ */
+let lastAiCall = 0;
+/** Optional pacing for free-tier quotas: AI_MIN_INTERVAL_MS=6000 ≈ 10 requests a minute. */
+async function pace() {
+	const gap = Number(process.env.AI_MIN_INTERVAL_MS || 0);
+	if (!gap) return;
+	const wait = lastAiCall + gap - Date.now();
+	if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+	lastAiCall = Date.now();
+}
+
+async function geminiCall(opts: { system: string; prompt: string; schema?: object; maxTokens?: number }) {
+	await pace();
+	const model = aiModel();
+	const url = `${(process.env.GEMINI_BASE_URL || 'https://generativelanguage.googleapis.com/v1beta').replace(/\/$/, '')}/models/${encodeURIComponent(model)}:generateContent`;
+	const base = {
+		systemInstruction: { parts: [{ text: opts.system }] },
+		contents: [{ role: 'user', parts: [{ text: opts.prompt }] }],
+		generationConfig: {
+			temperature: 0.1,
+			maxOutputTokens: opts.maxTokens || 4096,
+			...(opts.schema ? { responseMimeType: 'application/json' } : {}),
+		},
+	};
+	const attempt = async (withSchema: boolean) => {
+		const body = withSchema && opts.schema
+			? { ...base, generationConfig: { ...base.generationConfig, responseJsonSchema: opts.schema } }
+			: base;
+		for (let i = 0; i < 3; i++) {
+			const res = await fetch(url, {
+				method: 'POST',
+				headers: { 'x-goog-api-key': geminiKey(), 'content-type': 'application/json' },
+				body: JSON.stringify(body),
+				signal: AbortSignal.timeout(90_000),
+			});
+			const data: any = await res.json().catch(() => ({}));
+			if (res.status === 429 || res.status >= 500) {
+				await new Promise((r) => setTimeout(r, 2000 * 2 ** i));
+				continue;
+			}
+			return { res, data };
+		}
+		throw new Error('Gemini kept returning rate-limit or server errors');
+	};
+	let { res, data } = await attempt(true);
+	if (!res.ok && res.status === 400 && opts.schema) ({ res, data } = await attempt(false));
+	if (!res.ok) throw new Error(`Gemini ${res.status}: ${data?.error?.message || 'error'}`);
+	const cand = data.candidates?.[0];
+	const text = (cand?.content?.parts || []).filter((p: any) => !p.thought).map((p: any) => p.text || '').join('');
+	if (!text) throw new Error(`Gemini returned no text (finishReason ${cand?.finishReason || data?.promptFeedback?.blockReason || 'unknown'})`);
+	return { text, usage: data.usageMetadata || {}, model: data.modelVersion || model };
+}
+
+function parseJsonLoose(text: string) {
+	const t = text.trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '');
+	try { return JSON.parse(t); } catch { /* fall through */ }
+	const m = t.match(/\{[\s\S]*\}/);
+	if (m) return JSON.parse(m[0]);
+	throw new Error('Model did not return valid JSON');
 }
 
 async function openaiCall(body: any) {
@@ -174,6 +243,16 @@ export async function analyseThread(input: ThreadInput, orgId: number): Promise<
 	if (provider === 'heuristic') return { analysis: fallback, model: 'remail-heuristic-v1' };
 	const model = aiModel();
 	try {
+		if (provider === 'gemini') {
+			const r = await geminiCall({
+				system: SYSTEM(input.orgName),
+				prompt: `${buildPrompt(input).replace('call record_analysis', 'return the analysis as a single JSON object')}\n\nReturn ONLY a JSON object with exactly these fields: ${Object.keys((ANALYSIS_SCHEMA as any).properties).join(', ')}.`,
+				schema: ANALYSIS_SCHEMA,
+				maxTokens: 6000,
+			});
+			await logUsage(orgId, model, r.usage.promptTokenCount, (r.usage.candidatesTokenCount || 0) + (r.usage.thoughtsTokenCount || 0), 'analysis');
+			return { analysis: coerce(parseJsonLoose(r.text), fallback), model };
+		}
 		if (provider === 'anthropic') {
 			const data = await anthropicCall({
 				model,
@@ -213,6 +292,11 @@ export async function askLLM(orgId: number, system: string, prompt: string): Pro
 	const provider = aiProvider();
 	if (provider === 'heuristic') return null;
 	const model = aiModel();
+	if (provider === 'gemini') {
+		const r = await geminiCall({ system, prompt, maxTokens: 2048 });
+		await logUsage(orgId, model, r.usage.promptTokenCount, (r.usage.candidatesTokenCount || 0) + (r.usage.thoughtsTokenCount || 0), 'copilot');
+		return r.text;
+	}
 	if (provider === 'anthropic') {
 		const data = await anthropicCall({ model, max_tokens: 1500, system, messages: [{ role: 'user', content: prompt }] });
 		await logUsage(orgId, model, data.usage?.input_tokens, data.usage?.output_tokens, 'copilot');
