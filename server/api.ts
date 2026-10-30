@@ -12,7 +12,7 @@ import { getOrg, invalidateOrg } from './settings';
 import { randomToken, safeEqual } from './crypto';
 import {
 	microsoftAuthorizeUrl, microsoftConfigured, microsoftExchangeCode, microsoftAdminConsentUrl, microsoftSignIn,
-	microsoftTestMailbox, orgTenant, MS_SIGNIN_SCOPES,
+	microsoftTestMailbox, orgTenant, msSigninScopes,
 } from './connectors/microsoft';
 import { googleAuthorizeUrl, googleConfigured, googleExchangeCode } from './connectors/gmail';
 import { parseEml } from './connectors/upload';
@@ -34,6 +34,7 @@ r.get('/api/auth/config', async () => ({
 	mode: authMode(),
 	ravity: ravityConfigured(),
 	microsoft: microsoftSsoEnabled(),
+	microsoftConnectsMailbox: microsoftSsoEnabled() && process.env.MS_SIGNIN_CONNECTS_MAILBOX !== 'false',
 	orgName: (await getOrg(await defaultOrgId())).name,
 }), { auth: 'public' });
 
@@ -42,7 +43,7 @@ r.post('/api/auth/microsoft/start', async () => {
 	if (!microsoftSsoEnabled()) throw new HttpError(400, 'Microsoft sign-in is not configured');
 	const state = randomToken(24);
 	await q('insert into oauth_states (state, provider) values ($1, $2)', [state, 'ms_signin']);
-	return { url: microsoftAuthorizeUrl(state, `${appUrl()}/api/auth/microsoft/callback`, MS_SIGNIN_SCOPES, 'select_account') };
+	return { url: microsoftAuthorizeUrl(state, `${appUrl()}/api/auth/microsoft/callback`, msSigninScopes(), 'select_account') };
 }, { auth: 'public' });
 
 r.get('/api/auth/microsoft/callback', async (ctx) => {
@@ -53,6 +54,15 @@ r.get('/api/auth/microsoft/callback', async (ctx) => {
 	try {
 		const ms = await microsoftSignIn(ctx.query.get('code') || '', `${appUrl()}/api/auth/microsoft/callback`);
 		const res = await loginWithMicrosoft(ctx, ms);
+		if (ms.credentials) {
+			// signing in also connects (or refreshes) the person's own inbox, read-only
+			try {
+				const user = await one<any>('select * from users where lower(email)=$1 or ms_object_id=$2 limit 1', [ms.email, ms.objectId]);
+				if (user) await connectPersonalMailbox(ctx, user, 'microsoft', { address: ms.email, displayName: ms.fullName, credentials: ms.credentials }, Number(process.env.SIGNIN_BACKFILL_DAYS || 30), false);
+			} catch (e: any) {
+				console.error('[sso] mailbox connect', e.message);
+			}
+		}
 		return redirect(`${appUrl()}/auth/sso#token=${encodeURIComponent(res.token)}&loginTime=${encodeURIComponent(res.loginTime)}`);
 	} catch (e: any) {
 		console.error('[sso]', e.message);
@@ -776,6 +786,26 @@ r.post('/api/connect/:provider/start', async (ctx) => {
 	throw new HttpError(400, 'Unknown provider');
 });
 
+async function connectPersonalMailbox(ctx: any, user: any, prov: string, res: { address: string; displayName?: string; credentials: string }, backfillDays: number, reactivate = true) {
+	const existing = await one<any>(`select id from mailboxes where org_id=$1 and provider=$2 and lower(address)=lower($3)`, [user.org_id, prov, res.address]);
+	const mb = await one<any>(
+		`insert into mailboxes (org_id, provider, address, display_name, credentials_enc, backfill_days, created_by, status)
+		 values ($1,$2,$3,$4,$5,$6,$7,'active')
+		 on conflict (org_id, provider, lower(address)) do update set credentials_enc=excluded.credentials_enc,
+		   status=case when mailboxes.status='paused' and not $8 then 'paused' else 'active' end, last_error=null
+		 returning *`,
+		[user.org_id, prov, res.address, res.displayName || res.address, res.credentials, backfillDays, user.id, reactivate],
+	);
+	// personal mailbox: the person who connected it always sees it
+	await q('insert into user_mailboxes (user_id, mailbox_id) values ($1,$2) on conflict do nothing', [user.id, mb.id]);
+	if (res.address !== String(user.email).toLowerCase()) {
+		await q(`update users set email_aliases = (select array(select distinct unnest(email_aliases || array[$2::text]))) where id=$1`, [user.id, res.address]);
+	}
+	if (!existing) await audit({ ...ctx, user: undefined }, 'mailbox.connected', 'mailbox', mb.id, { provider: prov, address: res.address }, user);
+	if (mb.status === 'active') kickWorker(mb.id).catch(() => {});
+	return mb;
+}
+
 r.get('/api/connect/:provider/callback', async (ctx) => {
 	const provider = ctx.params.provider;
 	const state = ctx.query.get('state') || '';
@@ -789,20 +819,7 @@ r.get('/api/connect/:provider/callback', async (ctx) => {
 		const redirectUri = `${appUrl()}/api/connect/${provider}/callback`;
 		const res = provider === 'microsoft' ? await microsoftExchangeCode(code, redirectUri) : await googleExchangeCode(code, redirectUri);
 		const prov = provider === 'microsoft' ? 'microsoft' : 'gmail';
-		const mb = await one<any>(
-			`insert into mailboxes (org_id, provider, address, display_name, credentials_enc, backfill_days, created_by, status)
-			 values ($1,$2,$3,$4,$5,$6,$7,'active')
-			 on conflict (org_id, provider, lower(address)) do update set credentials_enc=excluded.credentials_enc, status='active', last_error=null
-			 returning *`,
-			[user.org_id, prov, res.address, res.displayName || res.address, res.credentials, st.payload?.backfillDays || 30, user.id],
-		);
-		// personal mailbox: the person who connected it always sees it
-		await q('insert into user_mailboxes (user_id, mailbox_id) values ($1,$2) on conflict do nothing', [user.id, mb.id]);
-		if (res.address !== String(user.email).toLowerCase()) {
-			await q(`update users set email_aliases = (select array(select distinct unnest(email_aliases || array[$2::text]))) where id=$1`, [user.id, res.address]);
-		}
-		await audit({ ...ctx, user: undefined }, 'mailbox.connected', 'mailbox', mb.id, { provider: prov, address: res.address }, user);
-		kickWorker(mb.id).catch(() => {});
+		await connectPersonalMailbox(ctx, user, prov, res, st.payload?.backfillDays || 30);
 		return back(res.address, true);
 	} catch (e: any) {
 		console.error('[connect]', e.message);

@@ -77,6 +77,7 @@ To generate the three secrets, run `openssl rand -hex 32` in a terminal for each
 | `MS_CLIENT_ID` | Application (client) ID from step 4 |
 | `MS_CLIENT_SECRET` | secret value from step 4 |
 | `MS_SSO_ALLOWED_DOMAINS` | `ravity.io` |
+| `MS_SSO_DEFAULT_ROLE` | optional. Role for people who sign in for the first time: `analyst` (default, sees only their own email), `viewer` or `manager`. |
 | `DATABASE_URL` | only if you used Option B in step 3 |
 
 Optional:
@@ -104,6 +105,14 @@ Optional:
 4. Under **Your own Outlook**, select **Connect my Outlook**, sign in as vikas@ravity.io and select **Accept**.
 5. You'll return to Mailboxes with "Connected vikas@ravity.io". The mailbox shows **Active** and the first sync starts. Select **Sync** on that row to run it straight away.
 6. A 30-day backfill of a normal mailbox takes 2 to 10 minutes, depending on volume. Gemini analysis runs in the same background job.
+
+### Colleagues at Ravity
+
+Everyone else just opens the site and selects **Sign in with Microsoft** with their ravity.io account. Microsoft asks them once to allow read-only access to their mail, and signing in connects their inbox automatically: no secrets, no Connect step. Their last 30 days sync in the background (`SIGNIN_BACKFILL_DAYS`).
+
+* They start as **analyst** and see only their own email. You, as admin, and anyone you make **manager** in **Admin → Users** see everyone's mail combined under **Everyone**.
+* To skip the per-person Microsoft prompt, tick **Consent on behalf of your organization** the first time you sign in with Microsoft as tenant admin. This grants only the delegated permissions, never "read all mailboxes".
+* A mailbox an admin has paused stays paused when its owner signs in again.
 
 ## Step 8. What to check
 

@@ -84,12 +84,16 @@ export async function microsoftExchangeCode(code: string, redirectUri: string) {
 	};
 }
 
-export const MS_SIGNIN_SCOPES = 'openid profile email User.Read';
+/** Sign-in also connects the person's own inbox read-only, unless MS_SIGNIN_CONNECTS_MAILBOX=false. */
+export const signinConnectsMailbox = () => process.env.MS_SIGNIN_CONNECTS_MAILBOX !== 'false';
+export const MS_SIGNIN_SCOPES_BASIC = 'openid profile email User.Read';
+export const msSigninScopes = () => (signinConnectsMailbox() ? MS_DELEGATED_SCOPES : MS_SIGNIN_SCOPES_BASIC);
+export const MS_SIGNIN_SCOPES = MS_SIGNIN_SCOPES_BASIC;
 
 /** "Sign in with Microsoft": OpenID Connect sign-in for Wheel King staff with their work accounts. */
 export async function microsoftSignIn(code: string, redirectUri: string) {
 	const data = await tokenRequest(
-		{ grant_type: 'authorization_code', code, redirect_uri: redirectUri, scope: MS_SIGNIN_SCOPES },
+		{ grant_type: 'authorization_code', code, redirect_uri: redirectUri, scope: msSigninScopes() },
 		process.env.MS_DELEGATED_TENANT || 'organizations',
 	);
 	const claims = decodeJwt(data.id_token || '');
@@ -99,6 +103,10 @@ export async function microsoftSignIn(code: string, redirectUri: string) {
 		fullName: me.displayName || claims.name || '',
 		objectId: String(me.id || claims.oid || ''),
 		tenantId: String(claims.tid || ''),
+		// present when sign-in included Mail.Read + offline_access: used to connect the person's inbox
+		credentials: data.refresh_token && /Mail\.Read/i.test(String(data.scope || ''))
+			? encrypt(JSON.stringify({ refresh_token: data.refresh_token }))
+			: null,
 	};
 }
 

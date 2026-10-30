@@ -67,6 +67,7 @@ export default function Login() {
 						<svg width="18" height="18" viewBox="0 0 21 21" aria-hidden="true"><rect x="1" y="1" width="9" height="9" fill="#f25022" /><rect x="11" y="1" width="9" height="9" fill="#7fba00" /><rect x="1" y="11" width="9" height="9" fill="#00a4ef" /><rect x="11" y="11" width="9" height="9" fill="#ffb900" /></svg>
 						{msBusy ? 'Redirecting…' : 'Sign in with Microsoft'}
 					</button>
+					{cfg.data?.microsoftConnectsMailbox && <div className="xs faint" style={{ marginTop: 8, textAlign: 'center' }}>Use your work account. Signing in also connects your Outlook inbox, read-only.</div>}
 					<div className="row" style={{ margin: '18px 0', color: 'var(--text-3)', fontSize: 12 }}><span className="grow" style={{ height: 1, background: '#d9dcea' }} />or with your {cfg.data?.ravity ? 'Ravity' : 'remail'} account<span className="grow" style={{ height: 1, background: '#d9dcea' }} /></div>
 				</>
 			)}
