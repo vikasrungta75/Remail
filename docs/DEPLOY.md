@@ -15,7 +15,7 @@ Setup takes about 15 minutes. You need a Netlify account, a Postgres database an
 
 Choose one:
 
-* **Netlify DB (simplest):** in the site, open **Extensions → Neon → Add database**, or run `npx netlify db init`. Netlify sets `NETLIFY_DATABASE_URL` for you, and remail reads it automatically.
+* **Netlify Database (simplest):** in the project, open **Data & Storage → Database → Create a database**. Netlify sets `NETLIFY_DB_URL` for you, and remail reads it automatically.
 * **Neon, Supabase, RDS or any other Postgres 14+:** create a database and set `DATABASE_URL` to the connection string, including `?sslmode=require`.
 
 Tables are created automatically on the first build (`npm run migrate`) and checked again on the first API call.
