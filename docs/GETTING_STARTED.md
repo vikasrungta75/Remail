@@ -26,11 +26,15 @@ remail uses **`gemini-3.8-flash`** by default. It's Google's current stable Flas
 
 ## Step 3. Add Postgres (3 minutes)
 
-**Option A, simplest:** in the Netlify project, open **Extensions**, search for **Neon**, then **Install → Add database**. Netlify creates the database and sets `NETLIFY_DATABASE_URL` for you.
+**Option A, Netlify Database (inside Netlify):** in the emailanalytics project, open **Data & Storage → Database** in the left menu and select **Create a database** (or **Create a database manually**). Netlify provisions Postgres and gives the site `NETLIFY_DB_URL` automatically. remail detects it, so there's nothing to copy.
 
-**Option B:** create a free database at **https://neon.tech**. Copy the connection string (it ends with `?sslmode=require`) and add it as `DATABASE_URL` in step 5.
+**Option B, Neon directly (works on every Netlify plan):**
+1. Go to **https://console.neon.tech** and sign up. Google sign-in works.
+2. Select **New project**. Name it `emailanalytics` and pick a region close to you, such as AWS Europe (London) or US East.
+3. On the project dashboard, select **Connect**. Copy the connection string, which starts with `postgresql://` and ends with `?sslmode=require`.
+4. In Netlify, go to **Project configuration → Environment variables** and add `DATABASE_URL` with that value.
 
-remail creates all its tables automatically on the next deploy.
+remail creates all its tables automatically on the next deploy or the first request.
 
 ## Step 4. Register remail in Microsoft Entra, Ravity's tenant (10 minutes)
 

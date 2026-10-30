@@ -999,8 +999,9 @@ r.post('/api/internal/tick', async (ctx) => {
 async function setupCheck() {
 	const has = (k: string) => !!process.env[k];
 	const checks: Record<string, { ok: boolean; detail: string }> = {};
-	const dbVar = ['DATABASE_URL', 'NETLIFY_DATABASE_URL', 'NETLIFY_DATABASE_URL_UNPOOLED'].find(has);
-	checks.database_variable = { ok: !!dbVar, detail: dbVar ? `using ${dbVar}` : 'Missing: add the Neon extension in Netlify, or set DATABASE_URL' };
+	const netlifyDb = !!(globalThis as any).Netlify?.env?.get?.('NETLIFY_DB_URL');
+	const dbVar = ['DATABASE_URL', 'NETLIFY_DB_URL', 'NETLIFY_DATABASE_URL', 'NETLIFY_DATABASE_URL_UNPOOLED'].find(has) || (netlifyDb ? 'NETLIFY_DB_URL' : undefined);
+	checks.database_variable = { ok: !!dbVar, detail: dbVar ? `using ${dbVar}` : 'Missing: in Netlify open Data & Storage → Database → Create a database, or set DATABASE_URL to a Neon connection string' };
 	if (dbVar) {
 		try {
 			await Promise.race([q('select 1'), new Promise((_, rej) => setTimeout(() => rej(new Error('timed out after 8s')), 8000))]);
