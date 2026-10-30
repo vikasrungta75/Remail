@@ -3,12 +3,17 @@ import { HttpError, Router, intParam, json, redirect, type Ctx } from './http';
 import {
 	authenticate, authMode, consumeResetToken, createResetToken, defaultOrgId, hashPassword, login, logout,
 	mailboxScope, publicUser, requireRole, verifyPassword, ROLE_RANK, type Role,
+	ravityConfigured, ravityForgotPassword, ravityResetPassword, microsoftSsoEnabled, loginWithMicrosoft,
 } from './auth';
+import { categoriesOverview, myDay, proposals, team } from './views';
 import { audit } from './audit';
 import { convFilter, dashboardSummary, dashboardTrends, filterOptions, insights } from './queries';
 import { getOrg, invalidateOrg } from './settings';
 import { randomToken, safeEqual } from './crypto';
-import { microsoftAuthorizeUrl, microsoftConfigured, microsoftExchangeCode } from './connectors/microsoft';
+import {
+	microsoftAuthorizeUrl, microsoftConfigured, microsoftExchangeCode, microsoftAdminConsentUrl, microsoftSignIn,
+	microsoftTestMailbox, orgTenant, MS_SIGNIN_SCOPES,
+} from './connectors/microsoft';
 import { googleAuthorizeUrl, googleConfigured, googleExchangeCode } from './connectors/gmail';
 import { parseEml } from './connectors/upload';
 import { ingestMessages } from './ingest';
@@ -19,7 +24,7 @@ import { appUrl, emailLayout, esc, mailerProvider, sendEmail } from './mailer';
 import { buildReport, runSchedule } from './reports';
 import { ask, SUGGESTED_QUESTIONS } from './copilot';
 import { loadDemoData, clearDemoData } from './demo';
-import { CATEGORIES, CATEGORY_LABELS } from './ai/types';
+import { BUSINESS_CATEGORIES, BUSINESS_LABELS, CATEGORIES, CATEGORY_LABELS, PROPOSAL_STAGES } from './ai/types';
 import type { MailboxRow } from './connectors/types';
 
 const r = new Router();
@@ -27,9 +32,56 @@ const r = new Router();
 // ── Auth ────────────────────────────────────────────────────────────────────
 r.get('/api/auth/config', async () => ({
 	mode: authMode(),
-	ravity: !!process.env.RAVITY_IAM_URL,
+	ravity: ravityConfigured(),
+	microsoft: microsoftSsoEnabled(),
 	orgName: (await getOrg(await defaultOrgId())).name,
 }), { auth: 'public' });
+
+// Sign in with Microsoft (Office 365 work account)
+r.post('/api/auth/microsoft/start', async () => {
+	if (!microsoftSsoEnabled()) throw new HttpError(400, 'Microsoft sign-in is not configured');
+	const state = randomToken(24);
+	await q('insert into oauth_states (state, provider) values ($1, $2)', [state, 'ms_signin']);
+	return { url: microsoftAuthorizeUrl(state, `${appUrl()}/api/auth/microsoft/callback`, MS_SIGNIN_SCOPES, 'select_account') };
+}, { auth: 'public' });
+
+r.get('/api/auth/microsoft/callback', async (ctx) => {
+	const fail = (m: string) => redirect(`${appUrl()}/auth/login?error=${encodeURIComponent(m)}`);
+	const st = await one<any>(`delete from oauth_states where state=$1 and provider='ms_signin' and created_at > now() - interval '15 minutes' returning *`, [ctx.query.get('state') || '']);
+	if (!st) return fail('The sign-in request expired. Please try again.');
+	if (ctx.query.get('error')) return fail(ctx.query.get('error_description') || ctx.query.get('error')!);
+	try {
+		const ms = await microsoftSignIn(ctx.query.get('code') || '', `${appUrl()}/api/auth/microsoft/callback`);
+		const res = await loginWithMicrosoft(ctx, ms);
+		return redirect(`${appUrl()}/auth/sso#token=${encodeURIComponent(res.token)}&loginTime=${encodeURIComponent(res.loginTime)}`);
+	} catch (e: any) {
+		console.error('[sso]', e.message);
+		return fail(e instanceof HttpError ? e.message : 'Microsoft sign-in failed. Please try again.');
+	}
+}, { auth: 'public' });
+
+// Microsoft 365 administrator consent (organisation-wide read-only access to the monitored mailboxes)
+r.post('/api/connect/microsoft-admin/start', async (ctx) => {
+	requireRole(ctx.user, 'admin');
+	if (!microsoftConfigured()) throw new HttpError(400, 'Set MS_CLIENT_ID and MS_CLIENT_SECRET first');
+	const state = randomToken(24);
+	await q('insert into oauth_states (state, user_id, provider) values ($1,$2,$3)', [state, ctx.user!.id, 'ms_admin']);
+	return { url: microsoftAdminConsentUrl(state, `${appUrl()}/api/connect/microsoft-admin/callback`, String(ctx.body?.tenant || 'organizations')) };
+});
+
+r.get('/api/connect/microsoft-admin/callback', async (ctx) => {
+	const back = (msg: string, ok: boolean) => redirect(`${appUrl()}/admin/mailboxes?${ok ? 'connected' : 'error'}=${encodeURIComponent(msg)}`);
+	const st = await one<any>(`delete from oauth_states where state=$1 and provider='ms_admin' and created_at > now() - interval '30 minutes' returning *`, [ctx.query.get('state') || '']);
+	if (!st) return back('The consent request expired. Please try again.', false);
+	if (ctx.query.get('error')) return back(ctx.query.get('error_description') || ctx.query.get('error')!, false);
+	const tenant = ctx.query.get('tenant') || '';
+	if (ctx.query.get('admin_consent') !== 'True' || !/^[0-9a-f-]{36}$/i.test(tenant)) return back('Consent was not granted', false);
+	const user = await one<any>('select * from users where id=$1', [st.user_id]);
+	await q(`update organisations set settings = settings || $2::jsonb where id=$1`, [user.org_id, JSON.stringify({ msTenantId: tenant, msConsentedAt: new Date().toISOString(), msConsentedBy: user.email })]);
+	invalidateOrg(user.org_id);
+	await audit({ ...ctx, user: undefined }, 'microsoft.admin_consent', 'organisation', user.org_id, { tenant }, user);
+	return back('Microsoft 365 organisation', true);
+}, { auth: 'public' });
 
 r.post('/api/auth/login', async (ctx) => {
 	const { userid, password } = ctx.body || {};
@@ -52,36 +104,43 @@ r.post('/api/auth/forgot-password', async (ctx) => {
 	const email = String(ctx.body?.email || '').trim().toLowerCase();
 	const u = await one<any>('select * from users where lower(email)=$1 and is_active', [email]);
 	if (u) {
-		if (u.auth_provider === 'ravity' && process.env.RAVITY_IAM_URL) {
-			// Password is owned by Ravity IAM — trigger its reset flow (same as rfleet)
-			try {
-				const base = process.env.RAVITY_IAM_URL.replace(/\/$/, '');
-				const sp: any = await (await fetch(`${base}/auth/getCustomerSpaces`, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ userid: email, authType: 'ep' }) })).json();
-				const space = (sp?.spaces?.spaces || []).find((s: any) => s.spaceName === (process.env.RAVITY_SPACE_NAME || 'remail')) || sp?.spaces?.spaces?.[0];
-				await fetch(`${base}/auth/forgetPassword`, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ emailID: email, spaceKey: String(space?.spaceKey ?? '') }) });
-			} catch (e: any) {
-				console.error('[auth] IAM forgot password', e.message);
-			}
+		if (u.auth_provider === 'ravity' && ravityConfigured()) {
+			// Password is owned by Ravity IAM — trigger its reset email (same as rfleet)
+			await ravityForgotPassword(email).catch((e) => console.error('[auth] IAM forgot password', e.message));
+		} else if (u.auth_provider === 'microsoft') {
+			/* Microsoft accounts reset their password with Microsoft */
 		} else {
 			const token = await createResetToken(u.id);
 			const link = `${appUrl()}/auth/reset-password?token=${token}`;
 			await sendEmail([u.email], 'Reset your remail password', emailLayout('Reset your password', `<p style="font-size:14px">We received a request to reset the password for ${esc(u.email)}. The link is valid for one hour.</p><p><a href="${link}" style="display:inline-block;background:#F00D69;color:#fff;text-decoration:none;padding:10px 18px;border-radius:10px;font-weight:700">Reset password</a></p><p style="font-size:12px;color:#5b6180">If you did not ask for this, you can ignore this email.</p>`)).catch((e) => console.error('[mail]', e.message));
 		}
 		await audit(ctx, 'auth.password_reset_requested', 'user', u.id, {}, u);
+	} else if (ravityConfigured()) {
+		// not yet provisioned in remail, but may exist in Ravity IAM
+		await ravityForgotPassword(email).catch(() => {});
 	}
 	// Always the same response — never reveal whether an account exists
 	return { success: true, message: 'If an account exists for that email, a reset link has been sent.' };
 }, { auth: 'public' });
 
 r.post('/api/auth/reset-password', async (ctx) => {
-	const userId = await consumeResetToken(String(ctx.body?.token || ''), String(ctx.body?.password || ''));
-	await audit(ctx, 'auth.password_reset', 'user', userId, {}, { id: userId });
+	const token = String(ctx.body?.token || '');
+	const password = String(ctx.body?.password || '');
+	try {
+		const userId = await consumeResetToken(token, password);
+		await audit(ctx, 'auth.password_reset', 'user', userId, {}, { id: userId });
+	} catch (e) {
+		// Not a remail token: a Ravity IAM reset link (as sent by rfleet's forgot-password)
+		if (!ravityConfigured()) throw e;
+		await ravityResetPassword(token, password);
+		await audit(ctx, 'auth.password_reset', 'user', null, { provider: 'ravity' });
+	}
 	return { success: true };
 }, { auth: 'public' });
 
 r.post('/api/auth/change-password', async (ctx) => {
 	const { currentPassword, newPassword } = ctx.body || {};
-	if (ctx.user!.authProvider !== 'local') throw new HttpError(400, 'Your password is managed by Ravity sign-in');
+	if (ctx.user!.authProvider !== 'local') throw new HttpError(400, ctx.user!.authProvider === 'microsoft' ? 'Your password is managed by Microsoft' : 'Your password is managed by Ravity sign-in');
 	if (!(await verifyPassword(ctx.user!.id, String(currentPassword || '')))) throw new HttpError(400, 'Current password is incorrect');
 	await q('update users set password_hash=$2, updated_at=now() where id=$1', [ctx.user!.id, await hashPassword(String(newPassword || ''))]);
 	await q('update sessions set revoked_at=now() where user_id=$1 and id<>$2 and revoked_at is null', [ctx.user!.id, ctx.user!.sessionId]);
@@ -90,10 +149,13 @@ r.post('/api/auth/change-password', async (ctx) => {
 });
 
 r.patch('/api/auth/profile', async (ctx) => {
-	const { fullName, timezone, notifyEmail } = ctx.body || {};
+	const { fullName, timezone, notifyEmail, digestEnabled, emailAliases } = ctx.body || {};
 	await q(
-		`update users set full_name=coalesce($2, full_name), timezone=coalesce($3, timezone), notify_email=coalesce($4, notify_email), updated_at=now() where id=$1`,
-		[ctx.user!.id, fullName ?? null, timezone ?? null, typeof notifyEmail === 'boolean' ? notifyEmail : null],
+		`update users set full_name=coalesce($2, full_name), timezone=coalesce($3, timezone), notify_email=coalesce($4, notify_email),
+		   digest_enabled=coalesce($5, digest_enabled), email_aliases=coalesce($6, email_aliases), updated_at=now() where id=$1`,
+		[ctx.user!.id, fullName ?? null, timezone ?? null, typeof notifyEmail === 'boolean' ? notifyEmail : null,
+			typeof digestEnabled === 'boolean' ? digestEnabled : null,
+			Array.isArray(emailAliases) ? emailAliases.map((x: string) => String(x).trim().toLowerCase()).filter((x: string) => /@/.test(x)) : null],
 	);
 	await audit(ctx, 'user.profile_updated', 'user', ctx.user!.id);
 	return publicUser(await one('select * from users where id=$1', [ctx.user!.id]));
@@ -103,6 +165,7 @@ r.patch('/api/auth/profile', async (ctx) => {
 r.get('/api/filters/options', async (ctx) => ({
 	...(await filterOptions(ctx.user!)),
 	categories: CATEGORIES.map((c) => ({ id: c, label: CATEGORY_LABELS[c] })),
+	types: BUSINESS_CATEGORIES.map((c) => ({ id: c, label: BUSINESS_LABELS[c] })),
 }));
 r.get('/api/dashboard/summary', (ctx) => dashboardSummary(ctx.user!, ctx.query));
 r.get('/api/dashboard/trends', (ctx) => dashboardTrends(ctx.user!, ctx.query));
@@ -128,6 +191,7 @@ r.get('/api/conversations', async (ctx) => {
 			`select c.id, c.subject, c.summary, c.sentiment, c.sentiment_score, c.rag, c.rag_reason, c.customer_state, c.urgency,
 			        c.escalation_risk, c.priority_score, c.categories, c.status, c.awaiting_reply, c.message_count, c.duplicate_count,
 			        c.last_message_at, c.last_inbound_at, c.first_response_minutes, c.mailbox_ids, c.assignee_id, c.analysed_at,
+			        c.business_category, c.proposal_stage, c.is_internal, c.is_automated,
 			        cu.id as customer_id, cu.name as customer_name, cu.tier as customer_tier, u.full_name as assignee_name,
 			        (select count(*) from action_items a where a.conversation_id=c.id and a.status='open')::int as open_actions
 			   from conversations c left join customers cu on cu.id=c.customer_id left join users u on u.id=c.assignee_id
@@ -143,7 +207,7 @@ r.get('/api/conversations/export', async (ctx) => {
 	requireRole(ctx.user, 'analyst');
 	const f = await convFilter(ctx.user!, ctx.query);
 	const rows = await q<any>(
-		`select c.id, cu.name as customer, cu.tier, c.subject, c.rag, c.sentiment, c.urgency, c.escalation_risk, c.status,
+		`select c.id, c.business_category as type, cu.name as customer, cu.tier, c.subject, c.rag, c.sentiment, c.urgency, c.escalation_risk, c.status,
 		        array_to_string(c.categories, '; ') as categories, c.message_count, c.awaiting_reply, c.first_response_minutes,
 		        c.last_message_at, c.summary
 		   from conversations c left join customers cu on cu.id=c.customer_id where ${f.where.join(' and ')}
@@ -200,8 +264,16 @@ r.patch('/api/conversations/:id', async (ctx) => {
 	requireRole(ctx.user, 'analyst');
 	const id = Number(ctx.params.id);
 	await assertConversationAccess(ctx, id);
-	const { status, assigneeId } = ctx.body || {};
+	const { status, assigneeId, businessCategory, proposalStage } = ctx.body || {};
 	if (status && !['open', 'in_progress', 'resolved', 'ignored'].includes(status)) throw new HttpError(400, 'Invalid status');
+	if (businessCategory) {
+		if (!(BUSINESS_CATEGORIES as readonly string[]).includes(businessCategory)) throw new HttpError(400, 'Invalid category');
+		await q('update conversations set business_category=$2, category_locked=true where id=$1', [id, businessCategory]);
+	}
+	if (proposalStage) {
+		if (!(PROPOSAL_STAGES as readonly string[]).includes(proposalStage)) throw new HttpError(400, 'Invalid stage');
+		await q(`update conversations set proposal_stage=$2, proposal_stage_locked=true, business_category='sales_proposal' where id=$1`, [id, proposalStage]);
+	}
 	await q(
 		`update conversations set status=coalesce($2,status), assignee_id = case when $3::text = 'unset' then assignee_id else $4::bigint end,
 		   resolved_at = case when $2='resolved' then now() when $2 is not null then null else resolved_at end, updated_at=now() where id=$1`,
@@ -238,13 +310,24 @@ r.post('/api/conversations/:id/reanalyse', async (ctx) => {
 	return { success: true };
 });
 
+// ── Comprehensive and individual views ──────────────────────────────────────
+r.get('/api/views/categories', (ctx) => categoriesOverview(ctx.user!, ctx.query));
+r.get('/api/views/my-day', (ctx) => myDay(ctx.user!));
+r.get('/api/views/proposals', (ctx) => proposals(ctx.user!, ctx.query));
+r.get('/api/views/team', async (ctx) => {
+	requireRole(ctx.user, 'manager');
+	return team(ctx.user!, ctx.query);
+});
+
 // ── Customers ───────────────────────────────────────────────────────────────
 r.get('/api/customers', async (ctx) => {
-	const f = await convFilter(ctx.user!, ctx.query);
+	const cq = new URLSearchParams(ctx.query);
+	if (cq.get('kind') && cq.get('kind') !== 'customer' && !cq.get('audience')) cq.set('audience', 'external');
+	const f = await convFilter(ctx.user!, cq);
 	const where = f.where.join(' and ');
 	const search = (ctx.query.get('q') || '').trim();
 	const rows = await q<any>(
-		`select cu.id, cu.name, cu.tier, cu.domains, cu.health_score, cu.health_status, cu.health_trend, cu.last_contact_at, cu.account_owner,
+		`select cu.id, cu.name, cu.tier, cu.kind, cu.domains, cu.health_score, cu.health_status, cu.health_trend, cu.last_contact_at, cu.account_owner,
 		        count(c.id)::int as conversations,
 		        count(c.id) filter (where c.rag='red')::int as red,
 		        count(c.id) filter (where c.rag='amber')::int as amber,
@@ -256,6 +339,7 @@ r.get('/api/customers', async (ctx) => {
 		        (select array_agg(x.cat) from (select unnest(categories) cat from conversations c2 where c2.customer_id=cu.id group by 1 order by count(*) desc limit 3) x) as top_categories
 		   from customers cu join conversations c on c.customer_id=cu.id
 		  where ${where} ${search ? `and cu.name ilike $${f.params.push(`%${search}%`)}` : ''}
+		    ${ctx.query.get('kind') && ctx.query.get('kind') !== 'all' ? `and cu.kind = $${f.params.push(ctx.query.get('kind'))}` : ''}
 		  group by cu.id order by cu.health_score asc nulls last, red desc limit 500`,
 		f.params,
 	);
@@ -290,7 +374,11 @@ r.get('/api/customers/:id', async (ctx) => {
 r.patch('/api/customers/:id', async (ctx) => {
 	requireRole(ctx.user, 'manager');
 	const id = Number(ctx.params.id);
-	const { name, tier, domains, accountOwner, notes } = ctx.body || {};
+	const { name, tier, domains, accountOwner, notes, kind } = ctx.body || {};
+	if (kind) {
+		if (!['customer', 'prospect', 'vendor', 'partner', 'candidate', 'other'].includes(kind)) throw new HttpError(400, 'Invalid type');
+		await q('update customers set kind=$3, kind_locked=true where id=$1 and org_id=$2', [Number(ctx.params.id), ctx.user!.orgId, kind]);
+	}
 	if (tier && !['strategic', 'key', 'standard'].includes(tier)) throw new HttpError(400, 'Invalid tier');
 	await q(
 		`update customers set name=coalesce($3,name), tier=coalesce($4,tier), domains=coalesce($5,domains), account_owner=coalesce($6,account_owner),
@@ -323,24 +411,75 @@ r.post('/api/customers/merge', async (ctx) => {
 
 // ── Action items ────────────────────────────────────────────────────────────
 r.get('/api/actions', async (ctx) => {
-	const f = await convFilter(ctx.user!, ctx.query, { ignoreDates: ctx.query.get('status') === 'open' && !ctx.query.get('from') });
+	const aq = new URLSearchParams(ctx.query);
+	if (!aq.get('audience')) aq.set('audience', 'all');
+	const f = await convFilter(ctx.user!, aq, { ignoreDates: (ctx.query.get('actionStatus') || 'open') === 'open' });
 	const st = ctx.query.get('actionStatus') || 'open';
 	const owner = ctx.query.get('owner');
-	const where = [...f.where];
 	const params = [...f.params];
-	if (st !== 'all') { params.push(st); where.push(`a.status = $${params.length}`); }
-	if (owner === 'us' || owner === 'customer') { params.push(owner); where.push(`a.owner_side = $${params.length}`); }
-	if (ctx.query.get('overdue') === 'true') where.push(`a.due_date < current_date`);
-	if (ctx.query.get('commitments') === 'true') where.push(`a.is_commitment`);
+	const extra: string[] = [];
+	if (st !== 'all') { params.push(st); extra.push(`a.status = $${params.length}`); }
+	if (owner === 'us' || owner === 'customer') { params.push(owner); extra.push(`a.owner_side = $${params.length}`); }
+	if (ctx.query.get('overdue') === 'true') extra.push(`a.due_date < current_date`);
+	if (ctx.query.get('commitments') === 'true') extra.push(`a.is_commitment`);
+	if (ctx.query.get('mine') === 'true') { params.push(ctx.user!.id); extra.push(`(a.assignee_id = $${params.length} or (a.assignee_id is null and a.created_by = $${params.length}))`); }
+	params.push(ctx.user!.orgId);
+	const orgP = params.length;
+	// manual actions (no conversation) are included when they fall in the user's view
 	const rows = await q<any>(
-		`select a.*, c.subject, c.rag, cu.name as customer_name, cu.tier as customer_tier, u.full_name as assignee_name
-		   from action_items a join conversations c on c.id=a.conversation_id left join customers cu on cu.id=a.customer_id
+		`select a.*, c.subject, c.rag, c.business_category, cu.name as customer_name, cu.tier as customer_tier, u.full_name as assignee_name
+		   from action_items a left join conversations c on c.id=a.conversation_id left join customers cu on cu.id=a.customer_id
 		   left join users u on u.id=a.assignee_id
-		  where ${where.join(' and ').replace(/c\.status <> 'ignored'/, `c.status <> 'ignored'`)}
+		  where a.org_id = $${orgP} and (${f.where.join(' and ')} or (a.conversation_id is null and c.id is null))
+		    ${extra.length ? `and ${extra.join(' and ')}` : ''}
 		  order by (a.due_date < current_date and a.status='open') desc, a.due_date nulls last, a.created_at desc limit 500`,
 		params,
 	);
 	return { rows };
+});
+
+r.post('/api/actions', async (ctx) => {
+	requireRole(ctx.user, 'analyst');
+	const { description, dueDate, conversationId, assigneeId, notes } = ctx.body || {};
+	if (!String(description || '').trim()) throw new HttpError(400, 'Describe the action');
+	let customerId: number | null = null;
+	if (conversationId) {
+		await assertConversationAccess(ctx, Number(conversationId));
+		customerId = (await one<any>('select customer_id from conversations where id=$1', [conversationId]))?.customer_id ?? null;
+	}
+	const row = await one<any>(
+		`insert into action_items (org_id, conversation_id, customer_id, description, owner_side, is_commitment, due_date, fingerprint, assignee_id, source, created_by, notes)
+		 values ($1,$2,$3,$4,'us',true,$5,$6,$7,'manual',$8,$9) returning *`,
+		[ctx.user!.orgId, conversationId || null, customerId, String(description).trim().slice(0, 500), dueDate || null, randomToken(12),
+			assigneeId ?? ctx.user!.id, ctx.user!.id, notes ? String(notes).slice(0, 2000) : null],
+	);
+	await audit(ctx, 'action.created', 'action_item', row.id, { conversationId });
+	return row;
+});
+
+/** Add an action to Outlook / any calendar (.ics) */
+r.get('/api/actions/:id/ics', async (ctx) => {
+	const a = await one<any>(
+		`select a.*, c.subject, cu.name as customer_name from action_items a left join conversations c on c.id=a.conversation_id
+		  left join customers cu on cu.id=a.customer_id where a.id=$1 and a.org_id=$2`,
+		[Number(ctx.params.id), ctx.user!.orgId],
+	);
+	if (!a) throw new HttpError(404, 'Action not found');
+	const day = (a.due_date || new Date().toISOString().slice(0, 10)).replace(/-/g, '');
+	const next = new Date(`${a.due_date || new Date().toISOString().slice(0, 10)}T00:00:00Z`);
+	next.setUTCDate(next.getUTCDate() + 1);
+	const esc2 = (t: string) => t.replace(/[\\;,]/g, (m) => `\\${m}`).replace(/\n/g, '\\n');
+	const link = a.conversation_id ? `${appUrl()}/conversations/${a.conversation_id}` : `${appUrl()}/actions`;
+	const ics = [
+		'BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Ravity//remail//EN', 'BEGIN:VEVENT',
+		`UID:remail-action-${a.id}@ravity.io`, `DTSTAMP:${new Date().toISOString().replace(/[-:]/g, '').slice(0, 15)}Z`,
+		`DTSTART;VALUE=DATE:${day}`, `DTEND;VALUE=DATE:${next.toISOString().slice(0, 10).replace(/-/g, '')}`,
+		`SUMMARY:${esc2(`remail: ${a.description}`.slice(0, 200))}`,
+		`DESCRIPTION:${esc2(`${a.customer_name ? `${a.customer_name} · ` : ''}${a.subject || ''}\n${link}`)}`,
+		`URL:${link}`, 'BEGIN:VALARM', 'TRIGGER:-PT15H', 'ACTION:DISPLAY', 'DESCRIPTION:remail action due', 'END:VALARM',
+		'END:VEVENT', 'END:VCALENDAR',
+	].join('\r\n');
+	return new Response(ics, { headers: { 'content-type': 'text/calendar; charset=utf-8', 'content-disposition': `attachment; filename="remail-action-${a.id}.ics"` } });
 });
 
 r.patch('/api/actions/:id', async (ctx) => {
@@ -348,7 +487,7 @@ r.patch('/api/actions/:id', async (ctx) => {
 	const id = Number(ctx.params.id);
 	const a = await one<any>('select * from action_items where id=$1 and org_id=$2', [id, ctx.user!.orgId]);
 	if (!a) throw new HttpError(404, 'Action not found');
-	await assertConversationAccess(ctx, a.conversation_id);
+	if (a.conversation_id) await assertConversationAccess(ctx, a.conversation_id);
 	const { status, dueDate, assigneeId } = ctx.body || {};
 	if (status && !['open', 'done', 'dismissed'].includes(status)) throw new HttpError(400, 'Invalid status');
 	await q(
@@ -398,7 +537,7 @@ r.post('/api/alerts/:id/:action', async (ctx) => {
 
 r.get('/api/alert-rules', async (ctx) => ({ rows: await q('select * from alert_rules where org_id=$1 order by id', [ctx.user!.orgId]) }));
 
-const RULE_TYPES = ['rag_red', 'negative_key_customer', 'escalation_risk', 'keyword', 'sla_breach', 'health_drop'];
+const RULE_TYPES = ['rag_red', 'negative_key_customer', 'escalation_risk', 'keyword', 'sla_breach', 'health_drop', 'action_overdue', 'proposal_deadline'];
 function ruleFields(b: any) {
 	if (b.rule_type && !RULE_TYPES.includes(b.rule_type)) throw new HttpError(400, 'Invalid rule type');
 	if (b.severity && !['medium', 'high', 'critical'].includes(b.severity)) throw new HttpError(400, 'Invalid severity');
@@ -526,14 +665,34 @@ r.get('/api/mailboxes', async (ctx) => {
 	);
 	return {
 		rows,
-		providers: { microsoft: microsoftConfigured(), microsoftApp: microsoftConfigured() && !!process.env.MS_TENANT_ID, google: googleConfigured() },
+		providers: await providerStatus(ctx.user!.orgId),
 	};
+});
+
+async function providerStatus(orgId: number) {
+	const tenant = microsoftConfigured() ? await orgTenant(orgId) : null;
+	const org = await getOrg(orgId);
+	return {
+		microsoft: microsoftConfigured(),
+		microsoftApp: microsoftConfigured() && !!tenant,
+		msTenantId: tenant,
+		msConsentedAt: (org.settings as any).msConsentedAt || null,
+		msConsentedBy: (org.settings as any).msConsentedBy || null,
+		google: googleConfigured(),
+	};
+}
+
+r.post('/api/mailboxes/test', async (ctx) => {
+	requireRole(ctx.user, 'admin');
+	const address = String(ctx.body?.address || '').trim().toLowerCase();
+	if (!/@/.test(address)) throw new HttpError(400, 'Enter a mailbox address');
+	return microsoftTestMailbox(ctx.user!.orgId, address);
 });
 
 r.post('/api/mailboxes', async (ctx) => {
 	requireRole(ctx.user, 'admin');
 	const { address, displayName, backfillDays } = ctx.body || {};
-	if (!microsoftConfigured() || !process.env.MS_TENANT_ID) throw new HttpError(400, 'Microsoft 365 app registration is not configured (MS_TENANT_ID, MS_CLIENT_ID, MS_CLIENT_SECRET)');
+	if (!microsoftConfigured() || !(await orgTenant(ctx.user!.orgId))) throw new HttpError(400, 'Connect your Microsoft 365 organisation first (administrator consent)');
 	if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(String(address || ''))) throw new HttpError(400, 'Enter a valid mailbox address');
 	const row = await one<any>(
 		`insert into mailboxes (org_id, provider, address, display_name, backfill_days, created_by) values ($1,'microsoft_app',$2,$3,$4,$5)
@@ -598,7 +757,8 @@ r.post('/api/system/run', async (ctx) => {
 });
 
 r.post('/api/connect/:provider/start', async (ctx) => {
-	requireRole(ctx.user, 'admin');
+	// anyone who works email can connect their own mailbox (individual view); org mailboxes need admin
+	requireRole(ctx.user, 'analyst');
 	const provider = ctx.params.provider;
 	const state = randomToken(24);
 	const redirectUri = `${appUrl()}/api/connect/${provider}/callback`;
@@ -636,7 +796,11 @@ r.get('/api/connect/:provider/callback', async (ctx) => {
 			 returning *`,
 			[user.org_id, prov, res.address, res.displayName || res.address, res.credentials, st.payload?.backfillDays || 30, user.id],
 		);
-		// internal identity: a personal test mailbox's own address must not be treated as a customer
+		// personal mailbox: the person who connected it always sees it
+		await q('insert into user_mailboxes (user_id, mailbox_id) values ($1,$2) on conflict do nothing', [user.id, mb.id]);
+		if (res.address !== String(user.email).toLowerCase()) {
+			await q(`update users set email_aliases = (select array(select distinct unnest(email_aliases || array[$2::text]))) where id=$1`, [user.id, res.address]);
+		}
 		await audit({ ...ctx, user: undefined }, 'mailbox.connected', 'mailbox', mb.id, { provider: prov, address: res.address }, user);
 		kickWorker(mb.id).catch(() => {});
 		return back(res.address, true);
@@ -677,7 +841,7 @@ r.get('/api/users', async (ctx) => {
 	requireRole(ctx.user, 'manager');
 	return {
 		rows: await q(
-			`select u.id, u.email, u.full_name, u.role, u.auth_provider, u.is_active, u.all_mailboxes, u.last_login_at, u.created_at,
+			`select u.id, u.email, u.full_name, u.role, u.auth_provider, u.is_active, u.all_mailboxes, u.last_login_at, u.created_at, u.email_aliases,
 			        coalesce((select array_agg(mailbox_id) from user_mailboxes um where um.user_id=u.id), '{}') as mailbox_ids
 			   from users u where u.org_id=$1 order by u.full_name`,
 			[ctx.user!.orgId],
@@ -692,7 +856,7 @@ r.post('/api/users', async (ctx) => {
 	if (!ROLE_RANK[role as Role]) throw new HttpError(400, 'Invalid role');
 	const exists = await one('select id from users where lower(email)=lower($1)', [email]);
 	if (exists) throw new HttpError(409, 'A user with this email already exists');
-	const provider = ctx.body?.authProvider === 'ravity' ? 'ravity' : 'local';
+	const provider = ['ravity', 'microsoft'].includes(ctx.body?.authProvider) ? ctx.body.authProvider : 'local';
 	const u = await one<any>(
 		`insert into users (org_id, email, full_name, role, auth_provider, all_mailboxes) values ($1,$2,$3,$4,$5,$6) returning *`,
 		[ctx.user!.orgId, String(email).toLowerCase(), fullName || email, role, provider, !!allMailboxes || role === 'admin' || role === 'manager'],
@@ -712,7 +876,8 @@ r.post('/api/users', async (ctx) => {
 r.patch('/api/users/:id', async (ctx) => {
 	requireRole(ctx.user, 'admin');
 	const id = Number(ctx.params.id);
-	const { role, isActive, fullName, mailboxIds, allMailboxes } = ctx.body || {};
+	const { role, isActive, fullName, mailboxIds, allMailboxes, emailAliases } = ctx.body || {};
+	if (Array.isArray(emailAliases)) await q('update users set email_aliases=$2 where id=$1 and org_id=$3', [id, emailAliases.map((x: string) => String(x).trim().toLowerCase()).filter((x: string) => /@/.test(x)), ctx.user!.orgId]);
 	if (role && !ROLE_RANK[role as Role]) throw new HttpError(400, 'Invalid role');
 	if (id === ctx.user!.id && (role && role !== 'admin' || isActive === false)) throw new HttpError(400, 'You cannot demote or disable your own account');
 	await q(
@@ -778,7 +943,9 @@ r.get('/api/system/status', async (ctx) => {
 		ai: { provider: aiProvider(), model: aiModel() },
 		mailer: mailerProvider(),
 		auth: authMode(),
-		connectors: { microsoft: microsoftConfigured(), microsoftApp: microsoftConfigured() && !!process.env.MS_TENANT_ID, google: googleConfigured() },
+		connectors: await providerStatus(ctx.user!.orgId),
+		ravity: ravityConfigured(),
+		microsoftSso: microsoftSsoEnabled(),
 		webhooks: { teams: !!process.env.TEAMS_WEBHOOK_URL, slack: !!process.env.SLACK_WEBHOOK_URL },
 		pendingAnalysis: pending?.n || 0,
 		mailboxes: mb,
@@ -789,7 +956,7 @@ r.get('/api/system/status', async (ctx) => {
 
 r.post('/api/system/demo', async (ctx) => {
 	requireRole(ctx.user, 'admin');
-	const res = await loadDemoData(ctx.user!.orgId);
+	const res = await loadDemoData(ctx.user!.orgId, ctx.user!.id);
 	const analysed = await analysePending(ctx.user!.orgId, 400, Date.now() + 18_000);
 	await q(`update action_items a set status='done', completed_at=now() from conversations c
 	         where c.id=a.conversation_id and c.status='resolved' and a.status='open' and (not a.is_commitment or c.last_message_at < now() - interval '10 days')`);

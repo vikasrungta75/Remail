@@ -2,7 +2,7 @@
  * Deterministic analyser. Used when no LLM is configured, as a fallback when the LLM call fails,
  * and in tests. Tuned for road-haulage / logistics customer email.
  */
-import { CATEGORY_LABELS, type Analysis, type Category, type Sentiment, type ThreadInput } from './types';
+import { CATEGORY_LABELS, type Analysis, type BusinessCategory, type Category, type ProposalStage, type Sentiment, type ThreadInput } from './types';
 
 const NEG: [RegExp, number][] = [
 	[/\b(unacceptable|appalling|disgraceful|ridiculous|shocking|outrageous|furious|livid)\b/i, 3],
@@ -36,6 +36,12 @@ const CATS: [Category, RegExp][] = [
 	['contract', /\b(contract|sla|terminate|termination|penalt(y|ies)|escalat(e|ion)|legal|solicitor|switch(ing)? supplier|review (our|the) relationship)\b/i],
 	['compliance', /\b(health and safety|h&s|accident|incident|insurance|hazardous|adr|tdg|hours of service|eld|tachograph|compliance|safety)\b/i],
 	['service_failure', /\b(failed|failure|service (failure|level)|not delivered|wrong (address|delivery|load)|delivered to the wrong|refused delivery)\b/i],
+	['breakdown_maintenance', /\b(broke(n)? down|breakdown|break-down|mechanical (issue|failure)|flat (tyre|tire)|tow(ed|ing)?|repair(s|ed)?|out of service|maintenance|pm service|engine (light|fault)|reefer (failure|unit))\b/i],
+	['accident_claim', /\b(accident|collision|incident report|cargo claim|claim (number|form|ref)|insurance claim|osd|over,? short (and|&) damaged)\b/i],
+	['detention', /\b(detention|waiting time|wait time|held (at|up at) (the )?(dock|shipper|receiver)|layover|demurrage)\b/i],
+	['border_customs', /\b(border|customs|aci|ace manifest|pars|paps|broker|cbsa|cbp|crossing)\b/i],
+	['eld_hos', /\b(eld|hours of service|hos|logbook|log book|out of hours|driver hours)\b/i],
+	['fuel', /\b(fuel (card|surcharge|cost|price)|diesel|def\b|fuel)\b/i],
 	['compliment', /\b(thank you so much|great (job|service|work)|well done|excellent service|really appreciate|impressed|brilliant)\b/i],
 	['enquiry', /\b(could you (please )?(let me know|confirm|advise)|can you (confirm|advise)|enquir(y|e|ies)|query|question|wondering)\b/i],
 ];
@@ -142,12 +148,65 @@ function entities(text: string) {
 	};
 }
 
+const BUSINESS_RULES: [BusinessCategory, RegExp, number][] = [
+	['sales_proposal', /\b(rfq|rfp|rfi|tender|quotation|quote|quoted|rate (request|card|confirmation|sheet)|proposal|bid|pricing for|lane rates?|contract renewal|new business|commercial terms|price list)\b/gi, 3],
+	['billing_finance', /\b(invoice|inv[- ]?\d|payment|remittance|credit note|statement of account|overdue (invoice|payment)|accounts payable|accounts receivable|bank|factoring|purchase order|po number)\b/gi, 2],
+	['operations', /\b(load|pick[- ]?up|delivery|deliveries|dispatch|booking|collection|pod|proof of delivery|eta|consignment|shipment|appointment|dock|trailer drop|lane|route)\b/gi, 1],
+	['fleet_maintenance', /\b(truck|tractor|trailer|reefer|repair|maintenance|breakdown|tyre|tire|telematics|eld|dashcam|dms|device|installation|gps|vehicle|odometer|engine)\b/gi, 1],
+	['compliance_safety', /\b(insurance|claim|accident|audit|compliance|safety|cvor|dot|fmcsa|inspection|violation|h&s|health and safety|tdg|hazmat)\b/gi, 2],
+	['vendor_partner', /\b(vendor|supplier|partner(ship)?|subscription|licen[sc]e|credits|integration|platform|software|account manager|renewal|sla)\b/gi, 1],
+	['people_hr', /\b(recruit|hiring|interview|candidate|payroll|salary|leave request|onboarding new|driver application|cv|resume|offer letter|appraisal)\b/gi, 3],
+	['events_marketing', /\b(webinar|event|conference|exhibitor|exhibition|summit|expo|register now|newsletter|invitation to|pitch day|meetup|workshop)\b/gi, 2],
+];
+
+function classifyBusiness(input: ThreadInput, text: string, hasIssues: boolean, negative: boolean): BusinessCategory {
+	if (input.isAutomated) return /webinar|event|conference|newsletter|register/i.test(text) ? 'events_marketing' : 'notifications';
+	const scores = new Map<BusinessCategory, number>();
+	for (const [cat, re, w] of BUSINESS_RULES) scores.set(cat, (text.match(re) || []).length * w);
+	const external = !input.isInternal;
+	const first = input.messages[0];
+	// we asked an outside company for a quote → procurement, not sales
+	if (external && first?.direction === 'outbound' && /\b(quote|quotation|price)\b/i.test(`${first.subject} ${first.body}`)) {
+		scores.set('vendor_partner', (scores.get('vendor_partner') || 0) + 8);
+		scores.set('sales_proposal', 0);
+	}
+	// an unhappy customer is a customer-service matter, whatever the topic
+	if (external && negative && first?.direction === 'inbound') return 'customer_service';
+	if (external && hasIssues) scores.set('customer_service', (scores.get('customer_service') || 0) + 6);
+	const best = [...scores.entries()].sort((a, b) => b[1] - a[1])[0];
+	if (best && best[1] >= 2) return best[0];
+	if (!external) return 'internal';
+	return input.messages.some((m) => m.direction === 'inbound') ? 'customer_service' : 'other';
+}
+
+function detectProposal(msgs: ThreadInput['messages'], text: string): Analysis['proposal'] {
+	const kindMatch = /\b(rfq|rfp|rfi|tender|quotation|quote|rate request|rate confirmation|rate review|proposal|bid|contract renewal)\b/i.exec(text);
+	const kind = kindMatch ? kindMatch[1].toLowerCase().replace('quotation', 'quote').replace(' ', '_') : 'proposal';
+	const out = msgs.filter((m) => m.direction === 'outbound').map((m) => m.body).join('\n');
+	const inn = msgs.filter((m) => m.direction !== 'outbound').map((m) => m.body).join('\n');
+	const last = msgs[msgs.length - 1];
+	let stage: ProposalStage = 'request_received';
+	if (/\b(we will send|we'll send|preparing|working on (the|our) (quote|proposal)|will revert with)\b/i.test(out)) stage = 'in_preparation';
+	if (/\b(please find (attached )?(our|the) (quote|quotation|proposal|rates|bid)|attached (is|are) our|we are pleased to (submit|quote)|submitted)\b/i.test(out)) stage = 'submitted';
+	if (/\b(counter|revised (rate|quote|offer)|discount|negotiat|best and final|can you do better|match (the|their) rate)\b/i.test(text)) stage = 'negotiation';
+	if (/\b(accepted|approved|go ahead|awarded|pleased to confirm|signed|is acceptable|we accept)\b/i.test(inn)) stage = 'won';
+	if (/\b(unsuccessful|not been selected|decided to go with|regret to inform|declined|not proceed)\b/i.test(inn)) stage = 'lost';
+	if (stage === 'submitted' && last && last.direction === 'outbound' && Date.now() - new Date(last.sentAt).getTime() > 14 * 86400_000) stage = 'no_response';
+	const dl = sentences(text).find((x) => /\b(deadline|due|by|before|submission|closing date|no later than)\b/i.test(x) && parseDue(x, new Date(msgs[0].sentAt)));
+	const amount = (text.match(/(?:£|\$|€|₹|USD|CAD|C\$|INR)\s?\d[\d,]*(?:\.\d{1,2})?(?:k|m)?(?:\s?(?:per|\/)\s?(?:mile|km|load|month|pallet))?/i) || [])[0] || null;
+	const scope = (text.match(/\b(?:from|ex)\s+[A-Z][a-z]+(?:\s[A-Z][a-z]+)?\s+to\s+[A-Z][a-z]+(?:\s[A-Z][a-z]+)?/) || [])[0] || null;
+	const next = stage === 'request_received' ? 'Prepare and send the quote' : stage === 'in_preparation' ? 'Finish and submit the proposal' : stage === 'submitted' ? 'Follow up for a decision' : stage === 'negotiation' ? 'Agree final terms' : stage === 'no_response' ? 'Chase for a decision' : null;
+	return { kind, stage, deadline: dl ? parseDue(dl, new Date(msgs[0].sentAt)) : null, value: amount, lanes_or_scope: scope, next_step: next };
+}
+
 export function heuristicAnalyse(input: ThreadInput): Analysis {
 	const msgs = input.messages;
 	const inbound = msgs.filter((m) => m.direction === 'inbound');
 	const outbound = msgs.filter((m) => m.direction === 'outbound');
 	const all = msgs.map((m) => `${m.subject}\n${m.body}`).join('\n');
-	const inboundText = inbound.map((m) => `${m.subject}\n${m.body}`).join('\n') || all;
+	// internal threads have no customer side: treat every message as the "voice" of the thread
+	const voice = input.isInternal ? msgs : inbound;
+	const inboundText = voice.map((m) => `${m.subject}\n${m.body}`).join('\n') || all;
 
 	const message_sentiments = msgs.map((m) => {
 		const s = scoreText(`${m.subject}. ${m.body}`);
@@ -156,7 +215,7 @@ export function heuristicAnalyse(input: ThreadInput): Analysis {
 	// customer sentiment weighted towards recent inbound messages
 	let wsum = 0;
 	let w = 0;
-	inbound.forEach((m, i) => {
+	voice.forEach((m, i) => {
 		const weight = 1 + i;
 		wsum += (message_sentiments.find((x) => x.index === m.index)?.score ?? 0) * weight;
 		w += weight;
@@ -218,11 +277,15 @@ export function heuristicAnalyse(input: ThreadInput): Analysis {
 			const s = raw.replace(/\.{2,}$/, '.');
 			if (answered && !COMMIT_US.test(s)) continue;
 			if (/^(ok|okay|thanks|thank you|great|perfect)\b/i.test(s)) continue;
+			// generic chasers ("Please respond ASAP.", "Please chase.") are not actionable on their own
+			if (/^(please\s+)?(respond|reply|chase|advise|confirm|call me|revert)( asap| urgently| today)?[.!]?$/i.test(s.trim()) || s.trim().length < 18) continue;
+			// statements about the customer's own plans are not requests to us
+			if (m.direction === 'inbound' && /^we need to (confirm|check|let|tell|inform) (with )?our\b/i.test(s)) continue;
 			if (s.length > 260 || /^(hi|hello|dear|regards|thanks)\b/i.test(s)) continue;
 			const base = new Date(m.sentAt);
-			if (m.direction === 'outbound' && COMMIT_US.test(s)) {
+			if ((m.direction === 'outbound' || m.direction === 'internal') && COMMIT_US.test(s)) {
 				action_items.push({ description: s.replace(/\s+/g, ' '), owner_side: 'us', owner_name: m.fromName || m.from, is_commitment: true, due_date: parseDue(s, base), message_index: m.index });
-			} else if (m.direction === 'inbound' && REQUEST.test(s) && /\?|please|kindly|need|require|can you|could you/i.test(s)) {
+			} else if ((m.direction === 'inbound' || (m.direction === 'internal' && m.index === msgs.length - 1)) && REQUEST.test(s) && /\?|please|kindly|need|require|can you|could you/i.test(s)) {
 				action_items.push({ description: s.replace(/\s+/g, ' '), owner_side: 'us', owner_name: null, is_commitment: false, due_date: parseDue(s, base), message_index: m.index });
 			} else if (m.direction === 'inbound' && COMMIT_US.test(s)) {
 				action_items.push({ description: s.replace(/\s+/g, ' '), owner_side: 'customer', owner_name: m.fromName || m.from, is_commitment: true, due_date: parseDue(s, base), message_index: m.index });
@@ -237,13 +300,21 @@ export function heuristicAnalyse(input: ThreadInput): Analysis {
 	// a short "thanks / ok / received" closing note does not need a reply
 	const ackOnly = lastIsInbound && lastMsg.body.trim().length < 160 && !/\?/.test(lastMsg.body) &&
 		/^\s*(hi[^\n]*\n+)?\s*(ok|okay|great|perfect|thanks|thank you|many thanks|cheers|noted|received|much appreciated|brilliant|lovely|excellent|that's great|sounds good)\b/i.test(lastMsg.body);
-	const awaiting = lastIsInbound && !ackOnly;
+	const awaiting = lastIsInbound && !ackOnly && !input.isAutomated;
 	const ent = entities(all);
 
 	const primary = categories.find((c) => c !== 'complaint') || categories[0];
 	const firstLine = sentences(lastInbound?.body || msgs[msgs.length - 1]?.body || '').find((s) => s.length > 25) || '';
-	const who = input.customerName || 'The customer';
-	const summaryParts = [
+	const who = input.isInternal ? 'Internal thread:' : input.customerName || 'The customer';
+	const business_category = classifyBusiness(input, all, issues.length > 0, sentiment === 'negative');
+	const proposal = business_category === 'sales_proposal' ? detectProposal(msgs, all) : null;
+	const internalSummary = input.isInternal || input.isAutomated
+		? [
+			input.isAutomated ? `Automated message from ${msgs[0]?.fromName || msgs[0]?.from}.` : `Internal thread between ${uniq(msgs.map((m) => (m.fromName || m.from).split(' ')[0])).slice(0, 4).join(', ')} (${msgs.length} message${msgs.length > 1 ? 's' : ''}).`,
+			firstLine || sentences(msgs[msgs.length - 1]?.body || '').find((x) => x.length > 20) ? `Latest: "${(firstLine || sentences(msgs[msgs.length - 1]?.body || '').find((x) => x.length > 20) || '').slice(0, 180)}"` : '',
+		]
+		: null;
+	const summaryParts = internalSummary || [
 		`${who} ${sentiment === 'negative' ? 'raised' : 'wrote about'} ${primary ? CATEGORY_LABELS[primary].toLowerCase() : 'a general matter'}${ent.shipment_refs[0] ? ` (${ent.shipment_refs[0]})` : ''}.`,
 		firstLine ? `Latest: "${firstLine.slice(0, 160)}${firstLine.length > 160 ? '…' : ''}"` : '',
 		outbound.length
@@ -281,7 +352,10 @@ export function heuristicAnalyse(input: ThreadInput): Analysis {
 		].join('\n')
 		: '';
 
+	if (proposal && !internalSummary) summaryParts.push(`Proposal stage: ${proposal.stage.replace(/_/g, ' ')}${proposal.deadline ? `, deadline ${proposal.deadline}` : ''}.`);
 	return {
+		business_category,
+		proposal,
 		summary: summaryParts.filter(Boolean).join(' '),
 		sentiment,
 		sentiment_score: score,

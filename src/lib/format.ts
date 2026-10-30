@@ -27,6 +27,12 @@ export const CATEGORY_LABELS: Record<string, string> = {
 	communication: 'Poor communication',
 	contract: 'Contract and escalation',
 	compliance: 'Compliance and safety',
+	breakdown_maintenance: 'Breakdown and maintenance',
+	accident_claim: 'Accident or cargo claim',
+	detention: 'Detention and waiting time',
+	border_customs: 'Border and customs',
+	eld_hos: 'ELD and hours of service',
+	fuel: 'Fuel and surcharges',
 	complaint: 'General complaint',
 	compliment: 'Compliment',
 	enquiry: 'Enquiry',
@@ -48,3 +54,34 @@ export const COLORS = {
 };
 export const RAG_COLORS: Record<string, string> = { red: COLORS.red, amber: COLORS.amber, green: COLORS.green };
 export const SENT_COLORS: Record<string, string> = { negative: COLORS.red, neutral: '#A3A9C2', positive: COLORS.green };
+
+export const BUSINESS_LABELS: Record<string, string> = {
+	customer_service: 'Customer service and issues',
+	sales_proposal: 'Sales, quotes and proposals',
+	operations: 'Operations and dispatch',
+	fleet_maintenance: 'Fleet, equipment and maintenance',
+	billing_finance: 'Billing, payments and finance',
+	compliance_safety: 'Compliance, safety and claims',
+	vendor_partner: 'Vendors, suppliers and partners',
+	people_hr: 'Drivers, people and recruitment',
+	internal: 'Internal team',
+	events_marketing: 'Events, marketing and newsletters',
+	notifications: 'Automated notifications',
+	other: 'Other',
+};
+export const BUSINESS_SHORT: Record<string, string> = {
+	customer_service: 'Customer service', sales_proposal: 'Proposals', operations: 'Operations', fleet_maintenance: 'Fleet',
+	billing_finance: 'Finance', compliance_safety: 'Compliance', vendor_partner: 'Vendors', people_hr: 'People',
+	internal: 'Internal', events_marketing: 'Events', notifications: 'Notifications', other: 'Other',
+};
+export const BUSINESS_COLORS: Record<string, string> = {
+	customer_service: '#F00D69', sales_proposal: '#5D2CA4', operations: '#E89040', fleet_maintenance: '#2C55BA',
+	billing_finance: '#00A8A5', compliance_safety: '#B4600F', vendor_partner: '#4C80FF', people_hr: '#12B886',
+	internal: '#0B1143', events_marketing: '#8A90A8', notifications: '#A3A9C2', other: '#C9CDE0',
+};
+export const bizLabel = (c?: string | null) => (c ? BUSINESS_LABELS[c] || c : '');
+export const STAGE_LABELS: Record<string, string> = {
+	request_received: 'Request received', in_preparation: 'In preparation', submitted: 'Submitted', negotiation: 'Negotiation',
+	won: 'Won', lost: 'Lost', no_response: 'No response',
+};
+export const KIND_LABELS: Record<string, string> = { customer: 'Customer', prospect: 'Prospect', vendor: 'Vendor', partner: 'Partner', candidate: 'Candidate', other: 'Other' };

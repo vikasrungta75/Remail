@@ -2,7 +2,7 @@ import bcrypt from 'bcryptjs';
 import { SignJWT, jwtVerify } from 'jose';
 import { one, q } from './db';
 import { HttpError, type Ctx } from './http';
-import { randomToken, sha256 } from './crypto';
+import { decrypt, encrypt, randomToken, sha256 } from './crypto';
 import { audit } from './audit';
 
 export type Role = 'admin' | 'manager' | 'analyst' | 'viewer';
@@ -70,6 +70,8 @@ async function seedOrgDefaults(id: number) {
 		['Legal, cancellation or penalty language', 'keyword', { keywords: ['legal action', 'lawyer', 'solicitor', 'terminate', 'cancel the contract', 'penalty', 'compensation', 'final notice', 'escalate to your md', 'switch supplier'] }, 'critical', 30],
 		['Customer awaiting reply beyond SLA', 'sla_breach', { hours: 4 }, 'medium', null],
 		['Customer health dropped sharply', 'health_drop', { points: 15 }, 'high', null],
+		['Action overdue', 'action_overdue', { days: 1 }, 'medium', null],
+		['Proposal deadline within 2 days', 'proposal_deadline', { days: 2 }, 'high', null],
 	];
 	for (const [name, type, params, sev, esc] of rules) {
 		await q(
@@ -101,11 +103,11 @@ async function ensureBootstrapAdmin(org: number) {
 }
 
 // ── Sessions ────────────────────────────────────────────────────────────────
-export async function issueSession(userId: number, ctx: Ctx) {
+export async function issueSession(userId: number, ctx: Ctx, iamToken?: string) {
 	const expires = new Date(Date.now() + SESSION_HOURS * 3600_000);
 	const s = await one<{ id: string }>(
-		`insert into sessions (user_id, expires_at, ip_address, user_agent) values ($1,$2,$3,$4) returning id`,
-		[userId, expires, ctx.ip, ctx.ua.slice(0, 300)],
+		`insert into sessions (user_id, expires_at, ip_address, user_agent, iam_token_enc) values ($1,$2,$3,$4,$5) returning id`,
+		[userId, expires, ctx.ip, ctx.ua.slice(0, 300), iamToken ? encrypt(iamToken) : null],
 	);
 	const token = await new SignJWT({ sid: s!.id })
 		.setProtectedHeader({ alg: 'HS256' })
@@ -162,47 +164,80 @@ export async function mailboxScope(user: SessionUser): Promise<number[] | null> 
 	return rows.map((r) => r.mailbox_id);
 }
 
-// ── Login: Ravity IAM (same flow as rfleet) ─────────────────────────────────
-async function iamPost(path: string, fields: Record<string, string>) {
+// ── Login: Ravity IAM (same flow and endpoints as rfleet) ───────────────────
+// rfleet: getCustomerSpaces → authenticateuser → getUserInfoByToken → getProfileUserDetails,
+// logout → /auth/logout, forgot → /user/forgetpasswordresetlink, reset → /auth/updateforgotpassword
+export const ravityConfigured = () => !!process.env.RAVITY_IAM_URL;
+
+export async function iamPost(path: string, fields: Record<string, string>, headers: Record<string, string> = {}) {
 	const base = (process.env.RAVITY_IAM_URL || '').replace(/\/$/, '');
-	const res = await fetch(`${base}${path}`, {
+	const res = await fetch(`${base}${path.startsWith('/') ? path : `/${path}`}`, {
 		method: 'POST',
-		headers: { 'content-type': 'application/x-www-form-urlencoded; charset=UTF-8', accept: '*/*' },
+		headers: { 'content-type': 'application/x-www-form-urlencoded; charset=UTF-8', accept: '*/*', ...headers },
 		body: new URLSearchParams(fields).toString(),
 		signal: AbortSignal.timeout(20_000),
 	});
-	if (!res.ok) throw new Error(`IAM ${path} responded ${res.status}`);
-	return res.json() as Promise<any>;
+	if (!res.ok && res.status !== 304) throw new Error(`IAM ${path} responded ${res.status}`);
+	return res.json().catch(() => ({})) as Promise<any>;
 }
 
-async function ravityLogin(userid: string, password: string) {
-	const spaceName = process.env.RAVITY_SPACE_NAME || 'remail';
+async function ravitySpace(userid: string) {
+	const spaceName = process.env.RAVITY_SPACE_NAME || '';
 	const spaces = await iamPost('/auth/getCustomerSpaces', { userid, authType: 'ep' });
 	if (!spaces?.spaces?.success) return { ok: false as const, message: spaces?.spaces?.errorMessage || spaces?.spaces?.message };
 	const list: any[] = spaces.spaces.spaces || [];
-	const space = list.find((s) => s.spaceName === spaceName) || list[0];
+	const space = (spaceName && list.find((s) => s.spaceName === spaceName)) || list[0];
+	return { ok: true as const, space };
+}
+
+async function ravityLogin(userid: string, password: string) {
+	const sp = await ravitySpace(userid);
+	if (!sp.ok) return sp;
 	const login = await iamPost('/auth/authenticateuser', {
 		userid,
 		authType: 'ep',
 		password,
-		customerkey: String(space?.customerKey ?? ''),
+		customerkey: String(sp.space?.customerKey ?? ''),
 	});
 	if (!login?.users?.success || !login.users.authToken)
 		return { ok: false as const, message: login?.users?.errorMessage || login?.users?.message };
-	const info = await iamPost('/auth/getUserInfoByToken',{ token: login.users.authToken });
-	const u = info?.users?.user || {};
+	const token = login.users.authToken as string;
+	const info = await iamPost('/auth/getUserInfoByToken', { token });
+	if (!info?.users?.success) return { ok: false as const, message: info?.users?.errorMessage || 'Could not read your Ravity profile' };
+	const u = info.users.user || {};
+	let profile: any = {};
+	try {
+		const pd = await iamPost('/user/getProfileUserDetails', { spacekey: String(u.spaceKey ?? '') }, { authtoken: token, spacekey: String(u.spaceKey ?? ''), userid: String(u.id ?? '') });
+		profile = pd?.users?.user || pd?.users || {};
+	} catch { /* profile is optional */ }
 	let props: any[] = [];
 	try { props = JSON.parse(u.customproperties || '[]'); } catch { props = []; }
-	const prop = (k: string) => props.find?.((p: any) => String(p?.key).toUpperCase() === k)?.value;
-	// Best-effort IAM logout: we only use the IAM to verify identity
-	iamPost('/auth/logout', { token: login.users.authToken }).catch(() => {});
+	const prop = (k: string) => (Array.isArray(props) ? props : []).find((p: any) => String(p?.key).toUpperCase() === k)?.value;
+	const fullName = profile.fullName || u.fullName || [profile.firstName || u.firstName, profile.lastName || u.lastName].filter(Boolean).join(' ') || userid;
 	return {
 		ok: true as const,
+		token,
 		externalId: String(u.id ?? userid),
-		fullName: u.fullName || [u.firstName, u.lastName].filter(Boolean).join(' ') || userid,
-		email: (u.email || u.emailID || userid).toLowerCase(),
+		spaceKey: String(u.spaceKey ?? sp.space?.spaceKey ?? ''),
+		fullName,
+		email: String(profile.emailID || profile.email || u.email || u.emailID || userid).toLowerCase(),
 		iamRole: String(prop('ROLE') || '').toLowerCase(),
 	};
+}
+
+/** rfleet's forgot-password: the Ravity IAM emails a reset link for the user's space. */
+export async function ravityForgotPassword(email: string) {
+	const sp = await ravitySpace(email);
+	if (!sp.ok) return false;
+	const r = await iamPost('/user/forgetpasswordresetlink', { emailID: email, spaceKey: String(sp.space?.spaceKey ?? '') });
+	return !!r?.users?.success;
+}
+
+/** rfleet's reset page posts the token from the email link with the new password. */
+export async function ravityResetPassword(encodedToken: string, newpassword: string) {
+	const r = await iamPost('/auth/updateforgotpassword', { encodedToken, newpassword });
+	if (!r?.users?.success) throw new HttpError(400, r?.users?.errorMessage || r?.users?.message || 'This reset link is invalid or has expired');
+	return true;
 }
 
 function mapIamRole(r: string): Role {
@@ -251,16 +286,21 @@ export async function login(ctx: Ctx, userid: string, password: string) {
 				const anyUser = await one('select id from users limit 1');
 				const role: Role = !anyUser || bootstrapAdmins.includes(email) ? 'admin' : mapIamRole(res.iamRole);
 				user = await one<any>(
-					`insert into users (org_id, email, full_name, role, auth_provider, external_id, all_mailboxes)
-					 values ($1,$2,$3,$4,'ravity',$5,$6) returning *`,
-					[org, email, res.fullName, role, res.externalId, role === 'admin' || role === 'manager'],
+					`insert into users (org_id, email, full_name, role, auth_provider, external_id, all_mailboxes, ravity_space_key)
+					 values ($1,$2,$3,$4,'ravity',$5,$6,$7) returning *`,
+					[org, email, res.fullName, role, res.externalId, role === 'admin' || role === 'manager', res.spaceKey],
 				);
 				await audit(ctx, 'user.provisioned', 'user', user.id, { provider: 'ravity', role }, user);
 			} else {
-				await q(`update users set full_name=coalesce(nullif($2,''), full_name), external_id=$3 where id=$1`, [user.id, res.fullName, res.externalId]);
+				user = await one<any>(
+					`update users set full_name=coalesce(nullif($2,''), full_name), external_id=$3, ravity_space_key=$4,
+					   auth_provider = case when auth_provider='local' and password_hash is null then 'ravity' else auth_provider end
+					 where id=$1 returning *`,
+					[user.id, res.fullName, res.externalId, res.spaceKey],
+				);
 			}
 			if (!user.is_active) throw new HttpError(403, 'This account is disabled');
-			return finishLogin(ctx, user);
+			return finishLogin(ctx, user, res.token);
 		}
 	}
 	return failLogin(ctx, email);
@@ -271,8 +311,8 @@ async function failLogin(ctx: Ctx, email: string): Promise<never> {
 	throw new HttpError(401, 'Invalid email or password');
 }
 
-async function finishLogin(ctx: Ctx, user: any) {
-	const session = await issueSession(user.id, ctx);
+export async function finishLogin(ctx: Ctx, user: any, iamToken?: string) {
+	const session = await issueSession(user.id, ctx, iamToken);
 	await audit(ctx, 'auth.login', 'user', user.id, { provider: user.auth_provider }, user);
 	return {
 		success: true,
@@ -293,12 +333,18 @@ export function publicUser(u: any) {
 		allMailboxes: u.all_mailboxes ?? u.allMailboxes,
 		timezone: u.timezone,
 		notifyEmail: u.notify_email,
+		digestEnabled: u.digest_enabled,
+		emailAliases: u.email_aliases || [],
 		lastLoginAt: u.last_login_at,
 	};
 }
 
 export async function logout(ctx: Ctx, user: SessionUser, loginTime?: string) {
-	await q('update sessions set revoked_at = now() where id=$1', [user.sessionId]);
+	const s = await one<any>('update sessions set revoked_at = now() where id=$1 returning iam_token_enc', [user.sessionId]);
+	// end the Ravity IAM session too, exactly as rfleet does on logout
+	if (s?.iam_token_enc && ravityConfigured()) {
+		try { await iamPost('/auth/logout', { token: decrypt(s.iam_token_enc) }); } catch (e: any) { console.error('[auth] IAM logout', e.message); }
+	}
 	let duration = '';
 	if (loginTime) {
 		const s = Math.max(0, Math.round((Date.now() - new Date(loginTime).getTime()) / 1000));
@@ -343,4 +389,37 @@ export async function consumeResetToken(token: string, newPassword: string) {
 export async function verifyPassword(userId: number, pw: string) {
 	const u = await one<any>('select password_hash from users where id=$1', [userId]);
 	return !!u?.password_hash && bcrypt.compare(pw, u.password_hash);
+}
+
+// ── Sign in with Microsoft (Entra ID / Office 365 work accounts) ────────────
+export const microsoftSsoEnabled = () => !!(process.env.MS_CLIENT_ID && process.env.MS_CLIENT_SECRET) && process.env.MS_SSO !== 'false';
+
+export async function loginWithMicrosoft(ctx: Ctx, ms: { email: string; fullName: string; objectId: string; tenantId: string }) {
+	const org = await defaultOrgId();
+	const { getOrg } = await import('./settings');
+	const o = await getOrg(org, true);
+	if (!ms.email) throw new HttpError(400, 'Your Microsoft account has no email address');
+	let user = await one<any>('select * from users where lower(email)=$1 or ms_object_id=$2 or $1 = any(email_aliases) limit 1', [ms.email, ms.objectId]);
+	if (!user) {
+		const domain = ms.email.split('@')[1] || '';
+		const anyUser = await one('select id from users limit 1');
+		const sameTenant = (o.settings as any).msTenantId && (o.settings as any).msTenantId === ms.tenantId;
+		const allowed = !anyUser || sameTenant || o.internalDomains.includes(domain) ||
+			(process.env.MS_SSO_ALLOWED_DOMAINS || '').toLowerCase().split(',').map((x) => x.trim()).includes(domain);
+		if (!allowed) {
+			await audit(ctx, 'auth.login_failed', 'user', null, { provider: 'microsoft', reason: 'not provisioned' }, { email: ms.email });
+			throw new HttpError(403, 'Your Microsoft account is not set up for remail yet. Ask an administrator to invite you.');
+		}
+		const bootstrapAdmins = (process.env.BOOTSTRAP_ADMIN_EMAILS || process.env.ADMIN_EMAIL || '').toLowerCase().split(',').map((x) => x.trim());
+		const role: Role = !anyUser || bootstrapAdmins.includes(ms.email) ? 'admin' : ((process.env.MS_SSO_DEFAULT_ROLE as Role) in ROLE_RANK ? (process.env.MS_SSO_DEFAULT_ROLE as Role) : 'analyst');
+		user = await one<any>(
+			`insert into users (org_id, email, full_name, role, auth_provider, ms_object_id, all_mailboxes) values ($1,$2,$3,$4,'microsoft',$5,$6) returning *`,
+			[org, ms.email, ms.fullName || ms.email, role, ms.objectId, role === 'admin' || role === 'manager'],
+		);
+		await audit(ctx, 'user.provisioned', 'user', user.id, { provider: 'microsoft', role }, user);
+	} else {
+		user = await one<any>('update users set ms_object_id=$2, full_name=coalesce(nullif(full_name,\'\'), $3) where id=$1 returning *', [user.id, ms.objectId, ms.fullName]);
+	}
+	if (!user.is_active) throw new HttpError(403, 'This account is disabled');
+	return finishLogin(ctx, user);
 }

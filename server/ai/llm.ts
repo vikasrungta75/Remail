@@ -5,7 +5,7 @@
  */
 import { q } from '../db';
 import { heuristicAnalyse } from './heuristic';
-import { ANALYSIS_SCHEMA, CATEGORIES, type Analysis, type ThreadInput } from './types';
+import { ANALYSIS_SCHEMA, BUSINESS_CATEGORIES, CATEGORIES, PROPOSAL_STAGES, type Analysis, type ThreadInput } from './types';
 
 export type Provider = 'anthropic' | 'openai' | 'azure' | 'heuristic';
 
@@ -27,12 +27,13 @@ export function aiModel(): string {
 	}
 }
 
-const SYSTEM = (org: string) => `You are remail, an analyst for ${org}, a road haulage and logistics company.
-You read customer email threads between ${org} and its customers and produce structured, factual analysis for the customer service and operations teams.
+const SYSTEM = (org: string) => `You are remail, an analyst for ${org}, a trucking and fleet management company (truckload, LTL, dispatch, cross-border Canada/US).
+You read every kind of business email thread at ${org} — customer issues, quotes and proposals, operations and dispatch, fleet maintenance, billing, compliance, vendors, people and internal team threads — and produce structured, factual analysis for managers and staff.
 Rules:
 - Base everything strictly on the emails. Do not invent shipment numbers, dates, amounts or promises.
 - "inbound" messages are from the customer, "outbound" are from ${org} staff, "internal" are between ${org} staff.
-- Sentiment reflects the CUSTOMER, weighted to their most recent messages. Polite but firm complaints are still negative.
+- Sentiment reflects the EXTERNAL party (customer, prospect or vendor), weighted to their most recent messages; for internal threads it reflects the overall tone. Polite but firm complaints are still negative.
+- For sales_proposal threads fill the proposal object (kind, stage, deadline, value, scope, next step).
 - RAG: red = dissatisfied customer with an urgent, repeated or high-impact problem, or any legal/churn/penalty signal; amber = a live concern or unanswered request that needs attention; green = routine, resolved or positive.
 - Action items: capture explicit commitments made by ${org} staff ("we will…", "I'll send…") with due dates when stated, and requests the customer is waiting on. Keep each under 25 words.
 - Dates: resolve relative dates ("tomorrow", "by Friday") against the message's sent time; output YYYY-MM-DD.
@@ -40,7 +41,7 @@ Rules:
 
 function buildPrompt(input: ThreadInput): string {
 	const lines = [
-		`Customer: ${input.customerName || 'Unknown'} (tier: ${input.customerTier || 'standard'})`,
+		input.isInternal ? 'Thread type: internal (staff only, no external party)' : `External party: ${input.customerName || 'Unknown'} (tier: ${input.customerTier || 'standard'})`,
 		`Conversation id: ${input.conversationId}`,
 		`Messages (oldest first):`,
 	];
@@ -103,7 +104,20 @@ function coerce(raw: any, fallback: Analysis): Analysis {
 		return Number.isFinite(n) ? Math.max(lo, Math.min(hi, n)) : def;
 	};
 	const date = (v: any) => (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : null);
+	const bc = pick(raw.business_category, BUSINESS_CATEGORIES, fallback.business_category);
+	const pr = raw.proposal && typeof raw.proposal === 'object' && bc === 'sales_proposal'
+		? {
+			kind: String(raw.proposal.kind || 'proposal').slice(0, 40),
+			stage: pick(raw.proposal.stage, PROPOSAL_STAGES, 'request_received'),
+			deadline: date(raw.proposal.deadline),
+			value: raw.proposal.value ? String(raw.proposal.value).slice(0, 120) : null,
+			lanes_or_scope: raw.proposal.lanes_or_scope ? String(raw.proposal.lanes_or_scope).slice(0, 200) : null,
+			next_step: raw.proposal.next_step ? String(raw.proposal.next_step).slice(0, 200) : null,
+		}
+		: bc === 'sales_proposal' ? fallback.proposal : null;
 	return {
+		business_category: bc,
+		proposal: pr,
 		summary: String(raw.summary || fallback.summary).slice(0, 1200),
 		sentiment: pick(raw.sentiment, ['positive', 'neutral', 'negative'] as const, fallback.sentiment),
 		sentiment_score: num(raw.sentiment_score, -1, 1, fallback.sentiment_score),

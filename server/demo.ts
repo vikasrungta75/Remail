@@ -132,12 +132,85 @@ const scenarios = (ref: string, inv: string, reg: string, site: string): Scenari
 	] },
 ];
 
+
+/** Beyond customer service: proposals, vendors, internal, people and automated mail. */
+type XStep = { from: 'ext' | 'staff' | 'staff2'; after: number; text: string };
+interface XThread { subject: string; mailbox: number; ext?: [string, string, string]; extOrg?: string; automated?: boolean; steps: XStep[] }
+
+const PROSPECTS: [string, string, string][] = [
+	['Laura Chen', 'laura.chen@maplegrocers.ca', 'Maple Grocers Distribution'],
+	['Ahmed Siddiqui', 'a.siddiqui@trilliumbuild.ca', 'Trillium Building Products'],
+	['Mark Fortin', 'mfortin@laurentianpaper.ca', 'Laurentian Paper'],
+	['Jenna Brooks', 'jenna@northernlightsretail.ca', 'Northern Lights Retail'],
+];
+const VENDORS: [string, string, string][] = [
+	['Service Desk', 'support@trackpointtelematics.com', 'TrackPoint Telematics'],
+	['Paul Haddad', 'paul.haddad@401tirecentre.ca', '401 Tire Centre'],
+	['Karen Liu', 'karen.liu@shieldfleetinsurance.ca', 'Shield Fleet Insurance'],
+	['Dev Patel', 'dev@ontariotruckrepair.ca', 'Ontario Truck Repair'],
+];
+
+const extraThreads = (i: number, site: string, truck: string): XThread[] => [
+	{ subject: `RFQ: dedicated truckload service ${site} to Montreal`, mailbox: 3, steps: [
+		{ from: 'ext', after: 0, text: `Hello,\n\nWe are inviting three carriers to quote for a dedicated truckload service from ${site} to Montreal, 5 loads a week, 53' dry van, starting January. Please submit your rates per load and fuel surcharge table by Friday. Submission deadline is ${['14 Nov', '20 Nov', '28 Nov'][i % 3]}.\n\nRegards` },
+		{ from: 'staff', after: 240, text: `Hi,\n\nThank you for the opportunity. We will send our quotation by Thursday, including fuel surcharge and accessorial charges.\n\nKind regards` },
+		{ from: 'staff', after: 2880, text: `Hi,\n\nPlease find attached our quotation: $1,850 per load all-in, fuel surcharge per the attached table, 98% on-time commitment.\n\nKind regards` },
+		{ from: 'ext', after: 4320, text: `Thanks. Your rate is higher than two other bids. Can you do better on the rate if we commit to 6 loads a week?` },
+	] },
+	{ subject: `Rate request ${7100 + i}: LTL pallets to Calgary`, mailbox: 3, steps: [
+		{ from: 'ext', after: 0, text: `Hi team,\n\nCould you quote for 8 pallets, 4,200 lbs, from ${site} to Calgary next week? We need the quote by tomorrow.\n\nThanks` },
+		{ from: 'staff', after: 120, text: `Hi,\n\nPlease find our quote: $2,340 all-in, transit 4 days. Valid for 7 days.\n\nKind regards` },
+		{ from: 'ext', after: 600, text: `Thanks, that is approved. Please go ahead and book it for Tuesday.` },
+	] },
+	{ subject: `Contract renewal and 2027 rate review`, mailbox: 4, steps: [
+		{ from: 'ext', after: 0, text: `Hi Rohit,\n\nOur contract renews on 31 December. Please send your proposal for 2027 rates and any service improvements by end of month.\n\nBest regards` },
+	] },
+	{ subject: `ELD units offline: ${truck} and Truck 90`, mailbox: 1, extOrg: 'vendor', steps: [
+		{ from: 'staff', after: 0, text: `Hi support,\n\nThe ELD units on ${truck} and Truck 90 have not reported since yesterday. Drivers cannot log hours of service. Please advise urgently.\n\nThanks` },
+		{ from: 'ext', after: 180, text: `Hello,\n\nWe have identified a firmware issue. We will push an update tonight and confirm by 9am tomorrow that both units are online.\n\nService Desk` },
+	] },
+	{ subject: `Quote for ${12 + (i % 4) * 4} drive tires (PO ${5300 + i})`, mailbox: 2, extOrg: 'vendor', steps: [
+		{ from: 'staff', after: 0, text: `Hi Paul,\n\nPlease send a quote for 24 drive tires for our tractors, delivery to the ${site} yard.\n\nThanks` },
+		{ from: 'ext', after: 300, text: `Hi,\n\nQuote attached: $389 per tire installed, total $9,336 plus HST. We can fit them next week.\n\nPaul` },
+	] },
+	{ subject: `Cargo claim CLM-${4400 + i} documents required`, mailbox: 2, extOrg: 'vendor', steps: [
+		{ from: 'ext', after: 0, text: `Hello,\n\nTo process the cargo claim we need the signed BOL, photos and the driver statement. Please send these within 5 business days.\n\nKaren Liu\nShield Fleet Insurance` },
+	] },
+	{ subject: `Dispatch plan for week ${40 + Math.floor(i / 12)}`, mailbox: 1, steps: [
+		{ from: 'staff', after: 0, text: `Team,\n\nWe are short two drivers next week. Can someone check whether we can cover the Montreal loads with the team drivers? Please confirm by Thursday.` },
+		{ from: 'staff2', after: 90, text: `I will check with the team drivers and update the plan by Wednesday afternoon.` },
+	] },
+	{ subject: `${['July', 'August', 'September', 'October', 'November', 'December'][Math.floor(i / 12) % 6]} month-end invoicing and aged receivables`, mailbox: 2, steps: [
+		{ from: 'staff', after: 0, text: `Hi all,\n\nAged receivables over 60 days are at $86,400. Please chase the top five accounts this week and send me an update by Friday.` },
+		{ from: 'staff2', after: 300, text: `I'll call the top three accounts tomorrow and send statements to the rest today.` },
+	] },
+	{ subject: `Driver application ${Math.floor(i / 12) + 1}: AZ licence, ${4 + (i % 5)} years experience`, mailbox: 0, steps: [
+		{ from: 'ext', after: 0, text: `Hello,\n\nI would like to apply for the AZ driver position. I have 6 years of cross-border experience and a clean abstract. My resume is attached.\n\nThanks` },
+		{ from: 'staff', after: 1440, text: `Thank you for applying. We would like to invite you for an interview on Monday at 10am at our ${site} terminal. Please confirm.` },
+	] },
+	{ subject: `Load board: ${8 + (i % 9)} new loads matching your lanes`, mailbox: 3, automated: true, steps: [
+		{ from: 'ext', after: 0, text: `14 new loads match your saved lanes (${site} - Montreal, ${site} - Chicago). View them on the load board.` },
+	] },
+	{ subject: `Fuel card statement ${['August', 'September', 'October'][i % 3]}`, mailbox: 2, automated: true, steps: [
+		{ from: 'ext', after: 0, text: `Your fuel card statement for October is ready. Total spend: $48,213.55 across 31 cards. This is an automated message, please do not reply.` },
+	] },
+	{ subject: `Webinar: winter driving safety for fleets`, mailbox: 0, automated: true, steps: [
+		{ from: 'ext', after: 0, text: `Join our free webinar on winter driving safety for fleet managers. Register now to save your seat.` },
+	] },
+];
+
+const AUTOMATED_SENDERS: [string, string][] = [
+	['Load Board', 'no-reply@loadlink-demo.ca'],
+	['Fuel Card Services', 'statements@fleetfuelcard-demo.ca'],
+	['Fleet Safety Council', 'newsletter@fleetsafety-demo.ca'],
+];
+
 function rnd(seed: number) {
 	let s = seed;
 	return () => ((s = (s * 1664525 + 1013904223) % 4294967296) / 4294967296);
 }
 
-export async function loadDemoData(orgId: number) {
+export async function loadDemoData(orgId: number, assignToUserId?: number) {
 	const org = await getOrg(orgId);
 	if (!org.internalDomains.includes('wheelking.com')) {
 		await q(`update organisations set internal_domains = array_append(internal_domains, 'wheelking.com') where id=$1`, [orgId]);
@@ -226,6 +299,52 @@ export async function loadDemoData(orgId: number) {
 			n++;
 		}
 	}
+	// non-customer-service mail: proposals, vendors, internal, people, automated
+	for (let i = 0; i < 70; i++) {
+		const site = pick(sites);
+		const list = extraThreads(i, site, pick(regs));
+		const xt = list[i % list.length];
+		const mb = mbs[xt.mailbox];
+		const isProposal = /RFQ|Rate request|Contract renewal/.test(xt.subject);
+		const ext: [string, string, string] = xt.automated
+			? [...AUTOMATED_SENDERS[i % AUTOMATED_SENDERS.length], 'automated'] as any
+			: xt.extOrg === 'vendor'
+				? VENDORS[/ELD/.test(xt.subject) ? 0 : /tire/i.test(xt.subject) ? 1 : /claim/i.test(xt.subject) ? 2 : 3]
+				: isProposal
+					? (i % 2 ? PROSPECTS[i % PROSPECTS.length] : (() => { const c = CUSTOMERS[i % CUSTOMERS.length]; return [c.contacts[0][0], `${c.contacts[0][1]}@${c.domain}`, c.name] as [string, string, string]; })())
+					: /Driver application/.test(xt.subject) ? [['Sam Rivera', 'sam.rivera.driver@gmail.com', 'Sam Rivera'], ['Gurpreet Singh', 'gsingh.az@outlook.com', 'Gurpreet Singh']][i % 2] as [string, string, string]
+					: ['', '', ''];
+		const [s1n, s1a] = STAFF[i % STAFF.length];
+		const [s2n, s2a] = STAFF[(i + 2) % STAFF.length];
+		let t = now - Math.floor(rand() * 40 * 1440) * 60_000;
+		const thread = `demo-x-${i}`;
+		let prevMid: string | null = null;
+		for (const [si, st] of xt.steps.entries()) {
+			t += st.after * 60_000;
+			if (t > now) break;
+			const from = st.from === 'ext' ? { address: ext[1], name: ext[0] } : st.from === 'staff' ? { address: s1a, name: s1n } : { address: s2a, name: s2n };
+			const toList = st.from === 'ext'
+				? [{ address: mb.address, name: mb.display_name }]
+				: ext[1] && !xt.automated ? [{ address: ext[1], name: ext[0] }] : [{ address: st.from === 'staff' ? s2a : s1a, name: st.from === 'staff' ? s2n : s1n }, { address: mb.address, name: mb.display_name }];
+			const mid = `<demo-x-${i}-${si}@demo>`;
+			const msg: NormalizedMessage = {
+				providerMessageId: `demo-x-${i}-${si}`, internetMessageId: mid, threadId: thread, inReplyTo: prevMid, references: prevMid ? [prevMid] : [],
+				from, to: toList, cc: [], subject: si === 0 ? xt.subject : `RE: ${xt.subject}`,
+				bodyText: `${st.text}\n\n${from.name}${st.from === 'ext' && ext[2] && !xt.automated ? `\n${ext[2]}` : st.from !== 'ext' ? '\nWheel King TransHaul' : ''}`,
+				sentAt: new Date(t), hasAttachments: /attached/.test(st.text), importance: null, webLink: null,
+				folder: st.from === 'ext' ? 'inbox' : 'sent', isAutomated: !!xt.automated,
+			};
+			const arr = byMailbox.get(mb.id) || [];
+			arr.push(msg);
+			byMailbox.set(mb.id, arr);
+			prevMid = mid;
+			n++;
+		}
+	}
+	for (const [name, domain] of [['Maple Grocers Distribution', 'maplegrocers.ca'], ['Trillium Building Products', 'trilliumbuild.ca'], ['Laurentian Paper', 'laurentianpaper.ca'], ['Northern Lights Retail', 'northernlightsretail.ca'], ['TrackPoint Telematics', 'trackpointtelematics.com'], ['401 Tire Centre', '401tirecentre.ca'], ['Shield Fleet Insurance', 'shieldfleetinsurance.ca'], ['Ontario Truck Repair', 'ontariotruckrepair.ca']]) {
+		const kind = /Telematics|Tire|Insurance|Repair/.test(name) ? 'vendor' : 'prospect';
+		await q(`insert into customers (org_id, name, domains, auto_created, kind) select $1,$2,$3,false,$4 where not exists (select 1 from customers where org_id=$1 and $5 = any(domains))`, [orgId, name, [domain], kind, domain]);
+	}
 	let inserted = 0;
 	let duplicates = 0;
 	// ingest all mailboxes in global time order so cross-mailbox threading behaves like live sync
@@ -246,6 +365,14 @@ export async function loadDemoData(orgId: number) {
 		    and id in (select distinct e.conversation_id from emails e join mailboxes m on m.id=e.mailbox_id where m.provider='demo')`,
 		[orgId],
 	);
+	// give the person loading the demo some work of their own (individual view)
+	if (assignToUserId) {
+		await q(
+			`update conversations set assignee_id=$2 where org_id=$1 and status in ('open','in_progress') and (id % 3 = 0 or business_category = 'sales_proposal')
+			   and id in (select distinct e.conversation_id from emails e join mailboxes m on m.id=e.mailbox_id where m.provider='demo')`,
+			[orgId, assignToUserId],
+		);
+	}
 	return { generated: n, inserted, duplicates };
 }
 

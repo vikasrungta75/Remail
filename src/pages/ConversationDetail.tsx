@@ -1,13 +1,14 @@
 import { Fragment, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { MdArrowBack, MdAutoAwesome, MdContentCopy, MdRefresh, MdOpenInNew, MdCheckCircle, MdRadioButtonUnchecked, MdAttachFile } from 'react-icons/md';
+import { MdArrowBack, MdAutoAwesome, MdContentCopy, MdRefresh, MdOpenInNew, MdCheckCircle, MdRadioButtonUnchecked, MdAttachFile, MdAdd } from 'react-icons/md';
+import { downloadIcs } from './MyDay';
 import { api } from '../api/client';
 import { useAuth } from '../contexts/AuthContext';
 import { useToast } from '../contexts/ToastContext';
 import { useFilterOptions } from '../components/FilterBar';
 import { Card, Empty, Health, Loader, RagBadge, SentimentBadge, StateBadge, StatusBadge, TierBadge, UrgencyBadge } from '../components/ui';
-import { COLORS, ago, catLabel, fmtDate, fmtDateTime, minutes, hoursSince } from '../lib/format';
+import { BUSINESS_COLORS, BUSINESS_LABELS, COLORS, STAGE_LABELS, ago, bizLabel, catLabel, fmtDate, fmtDateTime, minutes, hoursSince } from '../lib/format';
 
 export default function ConversationDetail() {
 	const { id } = useParams();
@@ -27,6 +28,12 @@ export default function ConversationDetail() {
 	const update = useMutation({ mutationFn: (body: any) => api(`/conversations/${id}`, { method: 'PATCH', body }), onSuccess: () => { refresh(); toast('Conversation updated'); }, onError: (e: any) => toast(e.message, 'error') });
 	const reanalyse = useMutation({ mutationFn: () => api(`/conversations/${id}/reanalyse`, { body: {} }), onSuccess: () => { refresh(); toast('Re-analysed'); }, onError: (e: any) => toast(e.message, 'error') });
 	const addNote = useMutation({ mutationFn: () => api(`/conversations/${id}/notes`, { body: { body: note } }), onSuccess: () => { setNote(''); refresh(); } });
+	const [newAction, setNewAction] = useState<{ description: string; dueDate: string } | null>(null);
+	const addAction = useMutation({
+		mutationFn: () => api('/actions', { body: { ...newAction, conversationId: Number(id) } }),
+		onSuccess: () => { setNewAction(null); refresh(); toast('Action added'); },
+		onError: (e: any) => toast(e.message, 'error'),
+	});
 	const setAction = useMutation({ mutationFn: (a: { id: number; status: string }) => api(`/actions/${a.id}`, { method: 'PATCH', body: { status: a.status } }), onSuccess: refresh });
 
 	if (isLoading) return <Loader />;
@@ -45,6 +52,9 @@ export default function ConversationDetail() {
 			<div className="page-head">
 				<div className="grow">
 					<div className="row wrap mb-8">
+						<span className="badge" style={{ background: (BUSINESS_COLORS[c.business_category] || '#ccc') + '22', color: 'var(--text)' }}>{bizLabel(c.business_category)}</span>
+						{c.is_internal && <span className="badge navy">Internal</span>}
+						{c.is_automated && <span className="badge">Automated</span>}
 						<RagBadge rag={c.rag} />
 						<SentimentBadge s={c.sentiment} score={c.sentiment_score} />
 						<UrgencyBadge u={c.urgency} />
@@ -53,7 +63,7 @@ export default function ConversationDetail() {
 					</div>
 					<h1 style={{ fontSize: 22 }}>{c.subject || '(no subject)'}</h1>
 					<p className="row wrap">
-						<Link to={`/customers/${c.customer_id}`} style={{ fontWeight: 700 }}>{c.customer_name || 'Unknown customer'}</Link>
+						{c.customer_id ? <Link to={`/customers/${c.customer_id}`} style={{ fontWeight: 700 }}>{c.customer_name || 'Unknown'}</Link> : <b>{c.is_automated ? 'Automated sender' : 'Internal thread'}</b>}
 						<TierBadge tier={c.customer_tier} />
 						<span className="faint">· {c.message_count} messages · started {fmtDate(c.first_message_at)} · last {ago(c.last_message_at)}</span>
 					</p>
@@ -69,6 +79,9 @@ export default function ConversationDetail() {
 						<select className="input" style={{ width: 190 }} value={c.assignee_id || ''} onChange={(e) => update.mutate({ assigneeId: e.target.value ? Number(e.target.value) : null })} aria-label="Assignee">
 							<option value="">Unassigned</option>
 							{(opts.data?.users || []).map((u: any) => <option key={u.id} value={u.id}>{u.full_name}</option>)}
+						</select>
+						<select className="input" style={{ width: 230 }} value={c.business_category} onChange={(e) => update.mutate({ businessCategory: e.target.value })} aria-label="Email type" title="Correct the email type">
+							{Object.entries(BUSINESS_LABELS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
 						</select>
 						<button className="btn" onClick={() => reanalyse.mutate()} disabled={reanalyse.isPending}><MdRefresh /> {reanalyse.isPending ? 'Analysing…' : 'Re-analyse'}</button>
 					</div>
@@ -118,6 +131,23 @@ export default function ConversationDetail() {
 				</div>
 
 				<div className="col gap-16">
+					{c.business_category === 'sales_proposal' && (
+						<Card title={<h2><span className="kw">Proposal</span> tracker</h2>} accent={COLORS.purple}>
+							<div className="kv">
+								<span className="k">Stage</span>
+								<span>{can('analyst') ? (
+									<select className="input" style={{ padding: '4px 8px' }} value={c.proposal_stage || 'request_received'} onChange={(e) => update.mutate({ proposalStage: e.target.value })} aria-label="Proposal stage">
+										{Object.entries(STAGE_LABELS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+									</select>
+								) : STAGE_LABELS[c.proposal_stage] || 'Request received'}</span>
+								{c.proposal?.kind && <><span className="k">Type</span><span>{String(c.proposal.kind).replace(/_/g, ' ')}</span></>}
+								{c.proposal?.deadline && <><span className="k">Deadline</span><span><b>{fmtDate(c.proposal.deadline)}</b></span></>}
+								{c.proposal?.value && <><span className="k">Value or rates</span><span>{c.proposal.value}</span></>}
+								{c.proposal?.lanes_or_scope && <><span className="k">Scope</span><span>{c.proposal.lanes_or_scope}</span></>}
+								{c.proposal?.next_step && <><span className="k">Next step</span><span>{c.proposal.next_step}</span></>}
+							</div>
+						</Card>
+					)}
 					<Card title="Details" accent={COLORS.navy}>
 						<div className="kv">
 							<span className="k">Customer health</span><span><Health score={c.customer_health} /></span>
@@ -144,7 +174,18 @@ export default function ConversationDetail() {
 						</Card>
 					)}
 
-					<Card title="Actions and commitments" accent={COLORS.general}>
+					<Card title="Actions and commitments" accent={COLORS.general}
+						actions={can('analyst') && <button className="btn sm" onClick={() => setNewAction({ description: '', dueDate: '' })}><MdAdd /> Add</button>}>
+						{newAction && (
+							<div className="col gap-8 mb-16">
+								<input className="input" placeholder="What needs to be done" value={newAction.description} onChange={(e) => setNewAction({ ...newAction, description: e.target.value })} autoFocus />
+								<div className="row">
+									<input type="date" className="input" value={newAction.dueDate} onChange={(e) => setNewAction({ ...newAction, dueDate: e.target.value })} aria-label="Due date" />
+									<button className="btn primary sm" disabled={!newAction.description.trim()} onClick={() => addAction.mutate()}>Save</button>
+									<button className="btn ghost sm" onClick={() => setNewAction(null)}>Cancel</button>
+								</div>
+							</div>
+						)}
 						{data.actions.length ? (
 							<div className="col gap-12">
 								{data.actions.map((a: any) => (
@@ -159,6 +200,8 @@ export default function ConversationDetail() {
 												<span className={`badge ${a.owner_side === 'us' ? 'blue' : 'purple'}`}>{a.owner_side === 'us' ? 'Owed by us' : 'Customer'}</span>
 												{a.is_commitment && <span className="badge teal">Commitment</span>}
 												{a.due_date && <span className={`badge ${a.status === 'open' && new Date(a.due_date) < new Date(new Date().toDateString()) ? 'red' : ''}`}>Due {fmtDate(a.due_date)}</span>}
+												{a.assignee_name && <span className="chip">{a.assignee_name}</span>}
+												<a className="xs" style={{ cursor: 'pointer' }} onClick={() => downloadIcs(a.id)}>Add to Outlook</a>
 											</div>
 										</div>
 									</div>

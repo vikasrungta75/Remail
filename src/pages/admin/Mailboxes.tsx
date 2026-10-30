@@ -1,7 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useSearchParams } from 'react-router-dom';
-import { MdAdd, MdSync, MdPause, MdPlayArrow, MdDelete, MdUpload, MdScience, MdMail, MdBusiness, MdInfoOutline, MdRestartAlt } from 'react-icons/md';
+import { MdAdd, MdSync, MdPause, MdPlayArrow, MdDelete, MdUpload, MdScience, MdMail, MdBusiness, MdInfoOutline, MdRestartAlt, MdCheckCircle } from 'react-icons/md';
+
+const MsLogo = () => (
+	<svg width="15" height="15" viewBox="0 0 21 21" aria-hidden="true"><rect x="1" y="1" width="9" height="9" fill="#f25022" /><rect x="11" y="1" width="9" height="9" fill="#7fba00" /><rect x="1" y="11" width="9" height="9" fill="#00a4ef" /><rect x="11" y="11" width="9" height="9" fill="#ffb900" /></svg>
+);
 import { api } from '../../api/client';
 import { useAuth } from '../../contexts/AuthContext';
 import { useToast } from '../../contexts/ToastContext';
@@ -9,8 +13,8 @@ import { Card, Empty, Loader, Modal, PageHead } from '../../components/ui';
 import { COLORS, ago } from '../../lib/format';
 
 const PROVIDER: Record<string, string> = {
-	microsoft_app: 'Microsoft 365 (organisation)',
-	microsoft: 'Outlook (connected account)',
+	microsoft_app: 'Microsoft 365 shared mailbox',
+	microsoft: 'Personal Outlook (delegated)',
 	gmail: 'Gmail',
 	upload: 'Imported files',
 	demo: 'Demo data',
@@ -38,6 +42,17 @@ export default function Mailboxes() {
 		mutationFn: (provider: string) => api(`/connect/${provider}/start`, { body: { backfillDays: backfill } }),
 		onSuccess: (r) => { window.location.href = r.url; },
 		onError: (e: any) => toast(e.message, 'error'),
+	});
+	const consent = useMutation({
+		mutationFn: () => api('/connect/microsoft-admin/start', { body: {} }),
+		onSuccess: (r) => { window.location.href = r.url; },
+		onError: (e: any) => toast(e.message, 'error'),
+	});
+	const [test, setTest] = useState<any>(null);
+	const testAccess = useMutation({
+		mutationFn: () => api('/mailboxes/test', { body: { address: addr } }),
+		onSuccess: (r) => setTest(r),
+		onError: (e: any) => setTest({ ok: false, reason: e.message }),
 	});
 	const addApp = useMutation({
 		mutationFn: () => api('/mailboxes', { body: { address: addr, displayName: name, backfillDays: backfill } }),
@@ -73,31 +88,39 @@ export default function Mailboxes() {
 	return (
 		<>
 			<PageHead kw="Mailboxes" rest="and connections" sub="remail reads email with read-only permissions. It never sends, moves or deletes anything in a monitored mailbox." />
+			<div className="grid g-3 mb-16">
+				<Card title={<h2><span className="kw">1.</span> Connect Microsoft 365</h2>} accent={COLORS.general}
+					sub="Organisation-wide, read-only (Mail.Read). Done once by a Microsoft 365 administrator.">
+					{p.microsoftApp ? (
+						<div className="notice ok small"><MdCheckCircle /><span>Connected to tenant <span className="mono">{p.msTenantId}</span>{p.msConsentedBy ? ` · approved by ${p.msConsentedBy}` : ''}</span></div>
+					) : (
+						<div className="small muted mb-16">An administrator approves remail's read-only access for the organisation. Microsoft shows the exact permissions before anything is granted.</div>
+					)}
+					{can('admin') && (
+						<button className={`btn ${p.microsoftApp ? '' : 'action'} mt-8`} disabled={!p.microsoft || consent.isPending} onClick={() => consent.mutate()}>
+							<MsLogo /> {p.microsoftApp ? 'Re-run administrator consent' : 'Grant administrator consent'}
+						</button>
+					)}
+					{!p.microsoft && <div className="xs faint mt-8">Add MS_CLIENT_ID and MS_CLIENT_SECRET in Netlify first (see docs/MICROSOFT_365_SETUP.md).</div>}
+				</Card>
+				<Card title={<h2><span className="kw">2.</span> Add shared mailboxes</h2>} accent={COLORS.blue}
+					sub="customerservice@, dispatch@, accounts@… Test access before adding.">
+					<div className="small muted mb-16">Restrict the app to these mailboxes with an Exchange application access policy, then add each one here.</div>
+					{can('admin') && <button className="btn action" disabled={!p.microsoftApp} onClick={() => setAdd(true)}><MdBusiness /> Add mailbox</button>}
+					{!p.microsoftApp && <div className="xs faint mt-8">Available after step 1.</div>}
+				</Card>
+				<Card title={<h2><span className="kw">Your</span> own Outlook</h2>} accent={COLORS.pink}
+					sub="Personal, delegated Mail.Read. Perfect for testing and for your individual view.">
+					<div className="small muted mb-16">Sign in with your Microsoft work account. Only you and administrators see this mailbox; it powers My day.</div>
+					<button className="btn primary" disabled={!p.microsoft || connect.isPending} onClick={() => connect.mutate('microsoft')}><MsLogo /> Connect my Outlook</button>
+				</Card>
+			</div>
 			{can('admin') && (
-				<div className="grid g-4 mb-16">
-					<Card title="Microsoft 365 shared mailboxes" accent={COLORS.general}>
-						<div className="small muted mb-16">For Wheel King production: application permission <b>Mail.Read</b>, limited to the monitored mailboxes by an Exchange access policy.</div>
-						<button className="btn action" disabled={!p.microsoftApp} onClick={() => setAdd(true)}><MdBusiness /> Add mailbox</button>
-						{!p.microsoftApp && <div className="xs faint mt-8">Set MS_TENANT_ID, MS_CLIENT_ID and MS_CLIENT_SECRET to enable.</div>}
-					</Card>
-					<Card title="Connect an Outlook account" accent={COLORS.blue}>
-						<div className="small muted mb-16">Sign in with any Microsoft account to monitor that mailbox (delegated <b>Mail.Read</b>). Ideal for testing.</div>
-						<button className="btn action" disabled={!p.microsoft || connect.isPending} onClick={() => connect.mutate('microsoft')}><MdMail /> Connect Outlook</button>
-						{!p.microsoft && <div className="xs faint mt-8">Set MS_CLIENT_ID and MS_CLIENT_SECRET to enable.</div>}
-					</Card>
-					<Card title="Connect Gmail" accent={COLORS.pink}>
-						<div className="small muted mb-16">Sign in with Google to test remail on a Gmail or Google Workspace mailbox (<b>gmail.readonly</b>).</div>
-						<button className="btn primary" disabled={!p.google || connect.isPending} onClick={() => connect.mutate('google')}><MdMail /> Connect Gmail</button>
-						{!p.google && <div className="xs faint mt-8">Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET to enable.</div>}
-					</Card>
-					<Card title="Import or demo" accent={COLORS.amber}>
-						<div className="small muted mb-16">Upload exported .eml files, or load a realistic Wheel King demo dataset.</div>
-						<div className="row wrap">
-							<input ref={fileRef} type="file" accept=".eml,message/rfc822" multiple hidden onChange={(e) => e.target.files?.length && upload.mutate(e.target.files)} />
-							<button className="btn" onClick={() => fileRef.current?.click()} disabled={upload.isPending}><MdUpload /> {upload.isPending ? 'Importing…' : 'Upload .eml'}</button>
-							<button className="btn" onClick={() => demo.mutate(true)} disabled={demo.isPending}><MdScience /> {demo.isPending ? 'Loading…' : 'Load demo'}</button>
-						</div>
-					</Card>
+				<div className="row wrap mb-16">
+					<input ref={fileRef} type="file" accept=".eml,message/rfc822" multiple hidden onChange={(e) => e.target.files?.length && upload.mutate(e.target.files)} />
+					<button className="btn sm" onClick={() => fileRef.current?.click()} disabled={upload.isPending}><MdUpload /> {upload.isPending ? 'Importing…' : 'Import .eml files'}</button>
+					<button className="btn sm" onClick={() => demo.mutate(true)} disabled={demo.isPending}><MdScience /> {demo.isPending ? 'Loading…' : 'Load Wheel King demo data'}</button>
+					{p.google && <button className="btn sm" disabled={connect.isPending} onClick={() => connect.mutate('google')}><MdMail /> Connect Gmail</button>}
 				</div>
 			)}
 			{can('admin') && (
@@ -154,7 +177,13 @@ export default function Mailboxes() {
 			{add && (
 				<Modal title="Add a Microsoft 365 mailbox" onClose={() => setAdd(false)}
 					footer={<><button className="btn" onClick={() => setAdd(false)}>Cancel</button><button className="btn primary" disabled={!addr || addApp.isPending} onClick={() => addApp.mutate()}><MdAdd /> Add mailbox</button></>}>
-					<div className="field"><label>Mailbox address</label><input className="input" value={addr} onChange={(e) => setAddr(e.target.value)} placeholder="customerservice@wheelking.com" /></div>
+					<div className="field"><label>Mailbox address</label>
+						<div className="row"><input className="input" value={addr} onChange={(e) => { setAddr(e.target.value); setTest(null); }} placeholder="customerservice@wheelking.com" />
+							<button className="btn" disabled={!addr || testAccess.isPending} onClick={() => testAccess.mutate()}>{testAccess.isPending ? 'Testing…' : 'Test access'}</button></div>
+						{test && (test.ok
+							? <div className="notice ok small mt-8"><MdCheckCircle /><span>Access granted. Inbox has {test.totalItems} items ({test.unread} unread).</span></div>
+							: <div className="notice error small mt-8"><MdInfoOutline /><span>{test.reason}</span></div>)}
+					</div>
 					<div className="field"><label>Display name</label><input className="input" value={name} onChange={(e) => setName(e.target.value)} placeholder="Customer Service" /></div>
 					<div className="field"><label>Look back</label>
 						<select className="input" value={backfill} onChange={(e) => setBackfill(Number(e.target.value))}>

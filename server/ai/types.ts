@@ -13,6 +13,12 @@ export const CATEGORIES = [
 	'communication',
 	'contract',
 	'compliance',
+	'breakdown_maintenance',
+	'accident_claim',
+	'detention',
+	'border_customs',
+	'eld_hos',
+	'fuel',
 	'complaint',
 	'compliment',
 	'enquiry',
@@ -34,10 +40,51 @@ export const CATEGORY_LABELS: Record<Category, string> = {
 	communication: 'Poor communication',
 	contract: 'Contract and escalation',
 	compliance: 'Compliance and safety',
+	breakdown_maintenance: 'Breakdown and maintenance',
+	accident_claim: 'Accident or cargo claim',
+	detention: 'Detention and waiting time',
+	border_customs: 'Border and customs',
+	eld_hos: 'ELD and hours of service',
+	fuel: 'Fuel and surcharges',
 	complaint: 'General complaint',
 	compliment: 'Compliment',
 	enquiry: 'Enquiry',
 };
+
+/** What kind of email this is — gives a comprehensive view across all mail, not only complaints. */
+export const BUSINESS_CATEGORIES = [
+	'customer_service',
+	'sales_proposal',
+	'operations',
+	'fleet_maintenance',
+	'billing_finance',
+	'compliance_safety',
+	'vendor_partner',
+	'people_hr',
+	'internal',
+	'events_marketing',
+	'notifications',
+	'other',
+] as const;
+export type BusinessCategory = (typeof BUSINESS_CATEGORIES)[number];
+
+export const BUSINESS_LABELS: Record<BusinessCategory, string> = {
+	customer_service: 'Customer service and issues',
+	sales_proposal: 'Sales, quotes and proposals',
+	operations: 'Operations and dispatch',
+	fleet_maintenance: 'Fleet, equipment and maintenance',
+	billing_finance: 'Billing, payments and finance',
+	compliance_safety: 'Compliance, safety and claims',
+	vendor_partner: 'Vendors, suppliers and partners',
+	people_hr: 'Drivers, people and recruitment',
+	internal: 'Internal team',
+	events_marketing: 'Events, marketing and newsletters',
+	notifications: 'Automated notifications',
+	other: 'Other',
+};
+
+export const PROPOSAL_STAGES = ['request_received', 'in_preparation', 'submitted', 'negotiation', 'won', 'lost', 'no_response'] as const;
+export type ProposalStage = (typeof PROPOSAL_STAGES)[number];
 
 export type Sentiment = 'positive' | 'neutral' | 'negative';
 export type Severity = 'low' | 'medium' | 'high' | 'critical';
@@ -58,10 +105,21 @@ export interface ThreadInput {
 	customerName: string;
 	customerTier: string;
 	orgName: string;
+	isInternal: boolean;
+	isAutomated: boolean;
 	messages: ThreadMessage[];
 }
 
 export interface Analysis {
+	business_category: BusinessCategory;
+	proposal: null | {
+		kind: string; // rfq, rfp, tender, quote, rate_request, proposal, contract_renewal
+		stage: ProposalStage;
+		deadline: string | null;
+		value: string | null;
+		lanes_or_scope: string | null;
+		next_step: string | null;
+	};
 	summary: string;
 	sentiment: Sentiment;
 	sentiment_score: number;
@@ -99,6 +157,19 @@ export interface Analysis {
 export const ANALYSIS_SCHEMA = {
 	type: 'object',
 	properties: {
+		business_category: { type: 'string', enum: [...BUSINESS_CATEGORIES], description: 'What kind of email thread this is. customer_service = a customer raising an issue or service request; sales_proposal = quotes, rate requests, RFQ/RFP/tenders, proposals, contract renewals (either direction); operations = loads, dispatch, pickups, deliveries, scheduling; fleet_maintenance = trucks, trailers, repairs, telematics/ELD equipment; billing_finance = invoices, payments, credit, accounting; compliance_safety = safety, insurance, accidents, claims, audits, regulations; vendor_partner = suppliers, partners, software and service providers; people_hr = drivers, staff, hiring, payroll; internal = only staff talking to each other about anything not above; events_marketing = events, webinars, newsletters, marketing; notifications = automated system messages.' },
+		proposal: {
+			type: ['object', 'null'],
+			description: 'Only for sales_proposal threads, otherwise null.',
+			properties: {
+				kind: { type: 'string', description: 'rfq, rfp, tender, quote, rate_request, proposal, contract_renewal' },
+				stage: { type: 'string', enum: ['request_received', 'in_preparation', 'submitted', 'negotiation', 'won', 'lost', 'no_response'] },
+				deadline: { type: ['string', 'null'], description: 'YYYY-MM-DD submission or decision deadline' },
+				value: { type: ['string', 'null'], description: 'Commercial value or rates mentioned' },
+				lanes_or_scope: { type: ['string', 'null'] },
+				next_step: { type: ['string', 'null'] },
+			},
+		},
 		summary: { type: 'string', description: '2-3 sentence factual summary of the conversation: what the customer wants, what has been done, current state.' },
 		sentiment: { type: 'string', enum: ['positive', 'neutral', 'negative'], description: 'Overall customer sentiment, weighted to the most recent customer messages.' },
 		sentiment_score: { type: 'number', description: '-1 (very negative) to 1 (very positive)' },
@@ -165,7 +236,7 @@ export const ANALYSIS_SCHEMA = {
 		legal_or_churn_signal: { type: 'boolean', description: 'Mentions of legal action, contract termination, switching supplier, formal claims or penalties.' },
 	},
 	required: [
-		'summary', 'sentiment', 'sentiment_score', 'customer_state', 'urgency', 'escalation_risk', 'categories', 'topics',
+		'business_category', 'proposal', 'summary', 'sentiment', 'sentiment_score', 'customer_state', 'urgency', 'escalation_risk', 'categories', 'topics',
 		'issues', 'action_items', 'entities', 'message_sentiments', 'requires_reply', 'suggested_reply', 'rag_suggestion',
 		'rag_reason', 'legal_or_churn_signal',
 	],

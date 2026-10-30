@@ -5,6 +5,11 @@ import Layout from './layout/Layout';
 import Login from './pages/auth/Login';
 import ForgotPassword from './pages/auth/ForgotPassword';
 import ResetPassword from './pages/auth/ResetPassword';
+import SsoCallback from './pages/auth/SsoCallback';
+import MyDay from './pages/MyDay';
+import AllEmail from './pages/AllEmail';
+import Proposals from './pages/Proposals';
+import Team from './pages/Team';
 import Overview from './pages/Overview';
 import Conversations, { CriticalIssues } from './pages/Conversations';
 import ConversationDetail from './pages/ConversationDetail';
@@ -37,9 +42,16 @@ export default function App() {
 			<Route path="/auth/login" element={!loading && user ? <Navigate to="/overview" replace /> : <Login />} />
 			<Route path="/auth/forgot-password" element={<ForgotPassword />} />
 			<Route path="/auth/reset-password" element={<ResetPassword />} />
+			<Route path="/auth/sso" element={<SsoCallback />} />
+			{/* Ravity IAM reset links (same path rfleet uses) */}
+			<Route path="/home" element={<ResetPassword />} />
 			<Route element={<Protected><Layout /></Protected>}>
-				<Route path="/" element={<Navigate to="/overview" replace />} />
+				<Route path="/" element={<Navigate to="/my-day" replace />} />
 				<Route path="/overview" element={<Overview />} />
+				<Route path="/my-day" element={<MyDay />} />
+				<Route path="/all-email" element={<AllEmail />} />
+				<Route path="/proposals" element={<Proposals />} />
+				<Route path="/team" element={<Protected min="manager"><Team /></Protected>} />
 				<Route path="/critical" element={<CriticalIssues />} />
 				<Route path="/conversations" element={<Conversations />} />
 				<Route path="/conversations/:id" element={<ConversationDetail />} />
@@ -51,7 +63,7 @@ export default function App() {
 				<Route path="/alerts" element={<Alerts />} />
 				<Route path="/reports" element={<Reports />} />
 				<Route path="/profile" element={<Profile />} />
-				<Route path="/admin/mailboxes" element={<Protected min="manager"><Mailboxes /></Protected>} />
+				<Route path="/admin/mailboxes" element={<Protected min="analyst"><Mailboxes /></Protected>} />
 				<Route path="/admin/users" element={<Protected min="manager"><Users /></Protected>} />
 				<Route path="/admin/settings" element={<Protected min="manager"><Settings /></Protected>} />
 				<Route path="/admin/audit" element={<Protected min="admin"><Audit /></Protected>} />

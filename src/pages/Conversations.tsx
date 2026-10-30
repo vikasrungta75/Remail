@@ -6,7 +6,7 @@ import { api, qs } from '../api/client';
 import { useFilters } from '../contexts/FilterContext';
 import FilterBar from '../components/FilterBar';
 import { Card, Empty, Loader, PageHead, RagDot, SentimentBadge, StatusBadge, TierBadge, UrgencyBadge } from '../components/ui';
-import { ago, catLabel, hoursSince } from '../lib/format';
+import { BUSINESS_COLORS, BUSINESS_SHORT, STAGE_LABELS, ago, catLabel, hoursSince } from '../lib/format';
 
 const SORTS = [
 	{ v: 'priority', l: 'Priority' },
@@ -16,7 +16,16 @@ const SORTS = [
 	{ v: 'sentiment', l: 'Most negative' },
 ];
 
-export function ConversationList({ preset = {}, defaultSort = 'priority', showSearch = true }: { preset?: Record<string, unknown>; defaultSort?: string; showSearch?: boolean }) {
+const AUDIENCES = [
+	{ v: 'all', l: 'All email' },
+	{ v: 'human', l: 'All except automated' },
+	{ v: 'external', l: 'External (customers, prospects, vendors)' },
+	{ v: 'customers', l: 'Customers only' },
+	{ v: 'internal', l: 'Internal team' },
+	{ v: 'automated', l: 'Automated and newsletters' },
+];
+
+export function ConversationList({ preset = {}, defaultSort = 'priority', showSearch = true, showAudience = false }: { preset?: Record<string, unknown>; defaultSort?: string; showSearch?: boolean; showAudience?: boolean }) {
 	const { params } = useFilters();
 	const nav = useNavigate();
 	const [sp, setSp] = useSearchParams();
@@ -25,11 +34,12 @@ export function ConversationList({ preset = {}, defaultSort = 'priority', showSe
 	const [awaiting, setAwaiting] = useState(false);
 	const [mine, setMine] = useState(false);
 	const [page, setPage] = useState(0);
+	const [audience, setAudience] = useState(sp.get('audience') || 'human');
 	const limit = 40;
 	useEffect(() => setQ(sp.get('q') || ''), [sp]);
-	useEffect(() => setPage(0), [params, q, sort, awaiting, mine]);
+	useEffect(() => setPage(0), [params, q, sort, awaiting, mine, audience]);
 
-	const query = { ...params, ...preset, q: sp.get('q') || undefined, sort, awaiting: awaiting || undefined, assignee: mine ? 'me' : undefined, limit, offset: page * limit };
+	const query = { ...params, audience: showAudience ? audience : undefined, ...preset, q: sp.get('q') || undefined, sort, awaiting: awaiting || undefined, assignee: mine ? 'me' : undefined, limit, offset: page * limit };
 	const { data, isLoading } = useQuery({ queryKey: ['conversations', query], queryFn: () => api(`/conversations${qs(query)}`), refetchInterval: 30_000 });
 
 	return (
@@ -43,6 +53,11 @@ export function ConversationList({ preset = {}, defaultSort = 'priority', showSe
 					</form>
 				)}
 				<div className="row wrap">
+					{showAudience && (
+						<select className="input" style={{ width: 260 }} value={audience} onChange={(e) => setAudience(e.target.value)} aria-label="Which email">
+							{AUDIENCES.map((a) => <option key={a.v} value={a.v}>{a.l}</option>)}
+						</select>
+					)}
 					<label className="row small"><input type="checkbox" checked={awaiting} onChange={(e) => setAwaiting(e.target.checked)} style={{ accentColor: 'var(--pink)' }} /> Awaiting reply</label>
 					<label className="row small"><input type="checkbox" checked={mine} onChange={(e) => setMine(e.target.checked)} style={{ accentColor: 'var(--pink)' }} /> Assigned to me</label>
 					<select className="input" style={{ width: 180 }} value={sort} onChange={(e) => setSort(e.target.value)} aria-label="Sort">
@@ -71,8 +86,9 @@ export function ConversationList({ preset = {}, defaultSort = 'priority', showSe
 										<td><RagDot rag={c.rag} /></td>
 										<td style={{ minWidth: 240, maxWidth: 320 }}>
 											<div className="row" style={{ fontWeight: 700 }}>
-												<span className="truncate">{c.customer_name || 'Unknown'}</span> <TierBadge tier={c.customer_tier} />
+												<span className="truncate">{c.customer_name || (c.is_automated ? 'Automated' : 'Internal')}</span> <TierBadge tier={c.customer_tier} />
 											</div>
+											<div className="row gap-4"><span className="chip" style={{ background: BUSINESS_COLORS[c.business_category] + '22', color: 'var(--text)' }}>{BUSINESS_SHORT[c.business_category] || 'Other'}</span>{c.proposal_stage && <span className="chip">{STAGE_LABELS[c.proposal_stage]}</span>}</div>
 											<div className="truncate muted">{c.subject || '(no subject)'}</div>
 											<div className="row wrap mt-8 gap-4">
 												{(c.categories || []).slice(0, 3).map((x: string) => <span key={x} className="chip">{catLabel(x)}</span>)}
@@ -123,9 +139,9 @@ export function ConversationList({ preset = {}, defaultSort = 'priority', showSe
 export default function Conversations() {
 	return (
 		<>
-			<PageHead kw="Conversations" rest="across all mailboxes" sub="Threads are reconstructed across mailboxes and duplicates are removed before analysis." />
-			<FilterBar show={['customer', 'mailbox', 'sentiment', 'rag', 'status', 'category', 'tier']} />
-			<ConversationList />
+			<PageHead kw="Conversations" rest="across all mailboxes" sub="Every thread, of every type. Threads are rebuilt across mailboxes and duplicates are removed before analysis." />
+			<FilterBar show={['type', 'customer', 'mailbox', 'sentiment', 'rag', 'status', 'category', 'tier']} />
+			<ConversationList showAudience />
 		</>
 	);
 }

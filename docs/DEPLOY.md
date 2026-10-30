@@ -36,9 +36,9 @@ Open **Site configuration → Environment variables** and add the following. The
 | `APP_URL` | only if you use a custom domain, e.g. `https://remail.ravity.ai` |
 
 Optional variables:
-* **Ravity sign-in like rfleet:** `RAVITY_IAM_URL` (the same value as rfleet's `REACT_APP_SERVICE_URL`) and `RAVITY_SPACE_NAME`.
-* **Microsoft 365:** `MS_TENANT_ID`, `MS_CLIENT_ID`, `MS_CLIENT_SECRET` (see MICROSOFT_365_SETUP.md).
-* **Gmail:** `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` (see GMAIL_SETUP.md).
+* **Ravity sign-in, same as rfleet:** `RAVITY_IAM_URL` (rfleet's `REACT_APP_SERVICE_URL`) and `RAVITY_SPACE_NAME` (rfleet's `REACT_APP_SPACE_NAME`).
+* **Microsoft 365:** `MS_CLIENT_ID` and `MS_CLIENT_SECRET`. These enable Sign in with Microsoft, Connect my Outlook and organisation consent (see MICROSOFT_365_SETUP.md).
+* **Gmail (optional):** `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` (see GMAIL_SETUP.md).
 * **Email delivery for alerts and reports:** `SMTP_*`, `RESEND_API_KEY` or `MS_SENDER_MAILBOX`.
 * **Chat alerts:** `TEAMS_WEBHOOK_URL`, `SLACK_WEBHOOK_URL`.
 
@@ -47,12 +47,21 @@ Optional variables:
 Trigger a deploy. Once it finishes:
 
 1. Open the site and sign in with `ADMIN_EMAIL` / `ADMIN_PASSWORD`.
-2. Go to **Admin → Mailboxes** and either connect a mailbox or select **Load demo** to explore.
+2. Go to **Admin → Mailboxes → Connect my Outlook** to test with your own Microsoft email, or select **Load Wheel King demo data** to explore.
 3. Under **Functions** in Netlify, confirm that `scheduler` runs every 5 minutes and that `worker-background` logs `[worker] done`.
 
 ## Sign-in modes
 
-remail supports the same sign-in mechanism as rfleet. With `RAVITY_IAM_URL` set, it calls Ravity IAM's `getCustomerSpaces`, then `authenticateuser`, then `getUserInfoByToken`, exactly as rfleet does. It then issues its own signed session, stored client-side under the `token` key just like rfleet. The first IAM user (or any address in `BOOTSTRAP_ADMIN_EMAILS`) becomes admin. Local password accounts keep working alongside it (`AUTH_MODE=both`).
+remail uses the same sign-in mechanism and backend as rfleet. With `RAVITY_IAM_URL` set, the server calls these in order:
+
+1. `/auth/getCustomerSpaces`
+2. `/auth/authenticateuser`
+3. `/auth/getUserInfoByToken`
+4. `/user/getProfileUserDetails`
+
+The Ravity token is kept encrypted with the session and revoked through `/auth/logout` when you sign out. Forgotten passwords go through `/user/forgetpasswordresetlink`, and the reset link (`/home?token=…`) posts to `/auth/updateforgotpassword`. The first user (or any address in `BOOTSTRAP_ADMIN_EMAILS`) becomes admin. Sign in with Microsoft and local admin passwords work alongside (`AUTH_MODE=both`).
+
+Add the remail site URL to the space's allowed reset-link URL in Ravity IAM if it differs from rfleet's.
 
 ## Scaling
 

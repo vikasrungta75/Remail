@@ -63,6 +63,8 @@ async function ingestOne(
 ): Promise<'skipped' | 'exists' | { duplicate: boolean; conversationId: number | null }> {
 	if (!m.from.address) return 'skipped';
 	if (m.isAutomated && org.settings.ignoreAutomated) return 'skipped';
+	// a "reply" from a known human to an automated thread is not automated
+	const automated = !!m.isAutomated;
 
 	const exists = await one('select id from emails where mailbox_id=$1 and provider_message_id=$2', [mb.id, m.providerMessageId]);
 	if (exists) return 'exists';
@@ -101,7 +103,9 @@ async function ingestOne(
 		direction === 'inbound'
 			? m.from
 			: [...m.to, ...m.cc].find((r) => r.address && !isInternal(org, mb, r.address));
-	const customerId = counterpart ? await resolveCustomer(org.id, counterpart.address, counterpart.name) : null;
+	// newsletters and system mail are categorised, but never become customer records
+	const customerId = counterpart && !automated ? await resolveCustomer(org.id, counterpart.address, counterpart.name) : null;
+	const staff = [m.from, ...m.to, ...m.cc].map((r) => r.address).filter((a) => a && isInternal(org, mb, a));
 
 	// ── Conversation resolution ───────────────────────────────────────────
 	const threadKey = m.threadId ? `t:${mb.provider}:${mb.id}:${m.threadId}` : null;
@@ -164,17 +168,20 @@ async function ingestOne(
 	await q(
 		`insert into emails (org_id, mailbox_id, conversation_id, provider_message_id, internet_message_id, provider_thread_id,
 			in_reply_to, dedup_key, content_hash, is_duplicate, duplicate_of, direction, from_address, from_name, to_addresses,
-			cc_addresses, subject, body_text, body_clean, snippet, has_attachments, importance, web_link, sent_at)
-		 values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)
+			cc_addresses, subject, body_text, body_clean, snippet, has_attachments, importance, web_link, sent_at, is_automated)
+		 values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)
 		 on conflict (mailbox_id, provider_message_id) do nothing`,
 		[
 			org.id, mb.id, conversationId, m.providerMessageId, m.internetMessageId, m.threadId, m.inReplyTo, dk, ch,
 			isDuplicate, canonical?.id ?? null, direction, m.from.address, m.from.name.slice(0, 200),
 			m.to.map((r) => r.address), m.cc.map((r) => r.address), m.subject.slice(0, 1000),
 			m.bodyText.slice(0, 100_000), clean.slice(0, 20_000), snippet(clean || m.bodyText), m.hasAttachments,
-			m.importance, m.webLink, m.sentAt,
+			m.importance, m.webLink, m.sentAt, automated,
 		],
 	);
+	if (staff.length) {
+		await q(`update conversations set staff_participants = (select array(select distinct unnest(staff_participants || $2::text[]))) where id=$1`, [conversationId, staff]);
+	}
 	await refreshConversation(conversationId, !isDuplicate, mb.id);
 	if (customerId) await q('update customers set last_contact_at = greatest(coalesce(last_contact_at, $2), $2) where id=$1', [customerId, m.sentAt]);
 	return { duplicate: isDuplicate, conversationId };
@@ -204,6 +211,8 @@ export async function refreshConversation(conversationId: number, markForAnalysi
 		     select round(extract(epoch from (min(o.sent_at) - f.first_in))/60)::int
 		       from nd o, firsts f where o.direction='outbound' and f.first_in is not null and o.sent_at > f.first_in
 		     group by f.first_in),
+		   is_automated     = coalesce((select bool_and(is_automated) from nd), false),
+		   is_internal      = c.customer_id is null and not coalesce((select bool_and(is_automated) from nd), false),
 		   needs_analysis = c.needs_analysis or $2,
 		   status = case when $2 and c.status = 'resolved' and (select direction from nd order by sent_at desc limit 1) = 'inbound' then 'open' else c.status end,
 		   updated_at = now()

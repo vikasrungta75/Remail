@@ -21,7 +21,7 @@ const DEFAULTS: OrgSettings = {
 	piiRedaction: true,
 	retentionDays: 365,
 	analysisWindowDays: 30,
-	ignoreAutomated: true,
+	ignoreAutomated: false,
 	reportTimezone: 'America/Toronto',
 };
 

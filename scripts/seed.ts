@@ -6,7 +6,8 @@ import { analysePending, backfillHealthHistory, updateCustomerHealth } from '../
 
 await ensureSchema();
 const org = await defaultOrgId();
-const res = await loadDemoData(org);
+const admin = await q<{ id: number }>(`select id from users where role='admin' order by id limit 1`);
+const res = await loadDemoData(org, admin[0]?.id);
 console.log('[seed] demo data', res);
 let total = 0;
 for (;;) {

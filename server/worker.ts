@@ -8,6 +8,7 @@ import { ingestMessages } from './ingest';
 import { analysePending, backfillHealthHistory } from './analyze';
 import { evaluateSlaAlerts, processEscalations } from './alerts';
 import { runDueReports } from './reports';
+import { evaluateDeliveryAlerts, sendDailyDigests } from './digest';
 
 export async function syncMailbox(mailboxId: number, maxMessages = 300) {
 	const mb = await one<MailboxRow>('select * from mailboxes where id=$1', [mailboxId]);
@@ -74,6 +75,8 @@ export async function runTick(opts: { budgetMs?: number; mailboxId?: number; rep
 	await evaluateSlaAlerts(orgId).catch((e) => console.error('[sla]', e.message));
 	log.escalated = await processEscalations(orgId).catch((e) => (console.error('[esc]', e.message), 0));
 	if (opts.reports !== false) log.reports = await runDueReports(orgId).catch((e) => (console.error('[reports]', e.message), 0));
+	await evaluateDeliveryAlerts(orgId).catch((e) => console.error('[delivery-alerts]', e.message));
+	if (opts.reports !== false) log.digests = await sendDailyDigests(orgId).catch((e) => (console.error('[digest]', e.message), 0));
 	await purgeExpired(orgId).catch(() => {});
 	return log;
 }

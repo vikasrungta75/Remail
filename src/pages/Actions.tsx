@@ -1,14 +1,15 @@
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
-import { MdCheckCircle, MdRadioButtonUnchecked, MdDoNotDisturbOn } from 'react-icons/md';
+import { MdCheckCircle, MdRadioButtonUnchecked, MdDoNotDisturbOn, MdAdd, MdEvent } from 'react-icons/md';
+import { downloadIcs } from './MyDay';
 import { api, qs } from '../api/client';
 import { useFilters } from '../contexts/FilterContext';
 import { useAuth } from '../contexts/AuthContext';
 import { useToast } from '../contexts/ToastContext';
 import FilterBar, { useFilterOptions } from '../components/FilterBar';
-import { Card, Empty, Kpi, Loader, PageHead, RagDot, Segmented, TierBadge } from '../components/ui';
-import { COLORS, fmtDate } from '../lib/format';
+import { Card, Empty, Kpi, Loader, Modal, PageHead, RagDot, Segmented, TierBadge } from '../components/ui';
+import { BUSINESS_SHORT, COLORS, fmtDate } from '../lib/format';
 
 export default function Actions() {
 	const { params } = useFilters();
@@ -20,7 +21,14 @@ export default function Actions() {
 	const [status, setStatus] = useState<'open' | 'done' | 'all'>('open');
 	const [owner, setOwner] = useState<'all' | 'us' | 'customer'>('us');
 	const [only, setOnly] = useState<'' | 'overdue' | 'commitments'>('');
-	const query = { ...params, from: status === 'open' ? undefined : params.from, actionStatus: status, owner: owner === 'all' ? undefined : owner, overdue: only === 'overdue' || undefined, commitments: only === 'commitments' || undefined };
+	const [mine, setMine] = useState(false);
+	const [create, setCreate] = useState<any>(null);
+	const query = { ...params, from: status === 'open' ? undefined : params.from, actionStatus: status, owner: owner === 'all' ? undefined : owner, overdue: only === 'overdue' || undefined, commitments: only === 'commitments' || undefined, mine: mine || undefined };
+	const add = useMutation({
+		mutationFn: () => api('/actions', { body: create }),
+		onSuccess: () => { setCreate(null); qc.invalidateQueries({ queryKey: ['actions'] }); qc.invalidateQueries({ queryKey: ['my-day'] }); toast('Action added'); },
+		onError: (e: any) => toast(e.message, 'error'),
+	});
 	const { data, isLoading } = useQuery({ queryKey: ['actions', query], queryFn: () => api(`/actions${qs(query)}`), refetchInterval: 60_000 });
 	const upd = useMutation({
 		mutationFn: (b: { id: number; body: any }) => api(`/actions/${b.id}`, { method: 'PATCH', body: b.body }),
@@ -34,8 +42,9 @@ export default function Actions() {
 
 	return (
 		<>
-			<PageHead kw="Actions" rest="and commitments" sub="Promises made by your team and requests customers are waiting on, extracted from every thread." />
-			<FilterBar show={['customer', 'mailbox', 'rag', 'tier']} />
+			<PageHead kw="Actions" rest="and commitments" sub="Promises made by your team and requests people are waiting on, extracted from every thread, plus your own to-dos."
+				actions={can('analyst') && <button className="btn primary" onClick={() => setCreate({ description: '', dueDate: '', assigneeId: null })}><MdAdd /> New action</button>} />
+			<FilterBar show={['type', 'customer', 'mailbox', 'rag', 'tier']} />
 			<div className="grid g-4 mb-16">
 				<Kpi label="Showing" value={rows.length} accent={COLORS.blue} />
 				<Kpi label="Overdue" value={overdue} accent={COLORS.red} onClick={() => setOnly('overdue')} />
@@ -46,6 +55,7 @@ export default function Actions() {
 				<Segmented value={status} onChange={setStatus} options={[{ v: 'open', l: 'Open' }, { v: 'done', l: 'Done' }, { v: 'all', l: 'All' }]} />
 				<Segmented value={owner} onChange={setOwner} options={[{ v: 'us', l: 'Owed by us' }, { v: 'customer', l: 'Customer to do' }, { v: 'all', l: 'Everyone' }]} />
 				<Segmented value={only} onChange={setOnly} options={[{ v: '', l: 'All types' }, { v: 'overdue', l: 'Overdue only' }, { v: 'commitments', l: 'Commitments only' }]} />
+				<label className="row small"><input type="checkbox" checked={mine} onChange={(e) => setMine(e.target.checked)} style={{ accentColor: 'var(--pink)' }} /> Assigned to me</label>
 			</div>
 			<Card flush>
 				{isLoading ? <Loader /> : !rows.length ? <Empty text="Nothing here" /> : (
@@ -65,9 +75,11 @@ export default function Actions() {
 											</td>
 											<td style={{ maxWidth: 460 }}>
 												<div style={{ textDecoration: a.status === 'done' ? 'line-through' : 'none' }}>{a.description}</div>
-												<div className="xs faint row gap-4 mt-8 cursor" onClick={() => nav(`/conversations/${a.conversation_id}`)}><RagDot rag={a.rag} /> {a.subject}</div>
+												{a.conversation_id
+													? <div className="xs faint row gap-4 mt-8 cursor" onClick={() => nav(`/conversations/${a.conversation_id}`)}><RagDot rag={a.rag} /> {a.subject} {a.business_category && <span className="chip">{BUSINESS_SHORT[a.business_category]}</span>}</div>
+													: <div className="xs faint mt-8">Added manually{a.notes ? ` · ${a.notes}` : ''}</div>}
 											</td>
-											<td><div className="row" style={{ fontWeight: 700 }}>{a.customer_name} <TierBadge tier={a.customer_tier} /></div></td>
+											<td><div className="row" style={{ fontWeight: 700 }}>{a.customer_name || <span className="faint">Internal</span>} <TierBadge tier={a.customer_tier} /></div></td>
 											<td>
 												<div className="row wrap gap-4">
 													<span className={`badge ${a.owner_side === 'us' ? 'blue' : 'purple'}`}>{a.owner_side === 'us' ? 'Owed by us' : 'Customer'}</span>
@@ -89,7 +101,10 @@ export default function Actions() {
 													</select>
 												) : a.assignee_name || a.owner_name || '–'}
 											</td>
-											<td>{a.status === 'open' && can('analyst') && <button className="btn ghost sm" title="Dismiss" onClick={() => upd.mutate({ id: a.id, body: { status: 'dismissed' } })}><MdDoNotDisturbOn /></button>}</td>
+											<td className="nowrap">
+												<button className="btn ghost sm" title="Add to Outlook calendar" onClick={() => downloadIcs(a.id)}><MdEvent /></button>
+												{a.status === 'open' && can('analyst') && <button className="btn ghost sm" title="Dismiss" onClick={() => upd.mutate({ id: a.id, body: { status: 'dismissed' } })}><MdDoNotDisturbOn /></button>}
+											</td>
 										</tr>
 									);
 								})}
@@ -98,6 +113,21 @@ export default function Actions() {
 					</div>
 				)}
 			</Card>
+			{create && (
+				<Modal title="New action" onClose={() => setCreate(null)}
+					footer={<><button className="btn" onClick={() => setCreate(null)}>Cancel</button><button className="btn primary" disabled={!create.description.trim() || add.isPending} onClick={() => add.mutate()}>Add action</button></>}>
+					<div className="field"><label>What needs to be done</label><textarea className="input" value={create.description} onChange={(e) => setCreate({ ...create, description: e.target.value })} placeholder="Send revised rate card to Northgate" /></div>
+					<div className="grid g-2">
+						<div className="field"><label>Due date</label><input type="date" className="input" value={create.dueDate} onChange={(e) => setCreate({ ...create, dueDate: e.target.value })} /></div>
+						<div className="field"><label>Owner</label>
+							<select className="input" value={create.assigneeId || ''} onChange={(e) => setCreate({ ...create, assigneeId: e.target.value ? Number(e.target.value) : null })}>
+								<option value="">Me</option>
+								{(opts.data?.users || []).map((u: any) => <option key={u.id} value={u.id}>{u.full_name}</option>)}
+							</select>
+						</div>
+					</div>
+				</Modal>
+			)}
 		</>
 	);
 }

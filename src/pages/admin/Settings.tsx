@@ -57,7 +57,7 @@ export default function Settings() {
 								<div className="field"><label>Reply SLA (hours)</label><input className="input" type="number" disabled={!admin} value={form.slaHours} onChange={(e) => setForm({ ...form, slaHours: Number(e.target.value) })} /></div>
 								<div className="field"><label>Health window (days)</label><input className="input" type="number" disabled={!admin} value={form.analysisWindowDays} onChange={(e) => setForm({ ...form, analysisWindowDays: Number(e.target.value) })} /></div>
 							</div>
-							<Switch checked={form.ignoreAutomated} onChange={(v) => admin && setForm({ ...form, ignoreAutomated: v })} label="Ignore newsletters, notifications and no-reply senders" />
+							<Switch checked={form.ignoreAutomated} onChange={(v) => admin && setForm({ ...form, ignoreAutomated: v })} label="Skip newsletters and automated email entirely (by default they are stored, categorised and never sent to AI)" />
 						</div>
 					</Card>
 					<Card title="Data protection" accent={COLORS.purple}>
@@ -74,11 +74,11 @@ export default function Settings() {
 							<>
 								<Status ok={d.ai.provider !== 'heuristic'} label="AI analysis" detail={d.ai.provider === 'heuristic' ? 'Built-in rules (add an AI key for full analysis)' : `${d.ai.provider} · ${d.ai.model}`} />
 								<Status ok={d.mailer !== 'none'} label="Email delivery for alerts and reports" detail={d.mailer === 'none' ? 'Not configured' : d.mailer} />
-								<Status ok={d.connectors.microsoftApp} label="Microsoft 365 organisation mailboxes" detail={d.connectors.microsoftApp ? 'Configured' : 'Not configured'} />
-								<Status ok={d.connectors.microsoft} label="Outlook account connection" detail={d.connectors.microsoft ? 'Configured' : 'Not configured'} />
-								<Status ok={d.connectors.google} label="Gmail connection" detail={d.connectors.google ? 'Configured' : 'Not configured'} />
+								<Status ok={d.connectors.microsoftApp} label="Microsoft 365 organisation consent" detail={d.connectors.microsoftApp ? `Tenant ${String(d.connectors.msTenantId).slice(0, 8)}…` : 'Not granted yet'} />
+								<Status ok={d.connectors.microsoft} label="Personal Outlook connection" detail={d.connectors.microsoft ? 'Available' : 'Not configured'} />
 								<Status ok={d.webhooks.teams || d.webhooks.slack} label="Teams or Slack alerts" detail={[d.webhooks.teams && 'Teams', d.webhooks.slack && 'Slack'].filter(Boolean).join(', ') || 'Not configured'} />
-								<Status ok={d.auth !== 'local'} label="Sign-in" detail={d.auth === 'local' ? 'remail passwords' : d.auth === 'ravity' ? 'Ravity sign-in' : 'Ravity sign-in with password fallback'} />
+								<Status ok={d.ravity} label="Ravity sign-in (rfleet accounts)" detail={d.ravity ? (d.auth === 'ravity' ? 'Ravity only' : 'Ravity with remail password fallback') : 'Set RAVITY_IAM_URL'} />
+								<Status ok={d.microsoftSso} label="Sign in with Microsoft" detail={d.microsoftSso ? 'Enabled' : 'Set MS_CLIENT_ID and MS_CLIENT_SECRET'} />
 								<Status ok={d.mailboxes.errors === 0} label="Mailboxes" detail={`${d.mailboxes.total} connected · ${d.mailboxes.errors} with errors`} />
 								<Status ok={d.pendingAnalysis < 50} label="Analysis queue" detail={`${d.pendingAnalysis} conversations waiting`} />
 								<div className="small faint mt-16">Last worker run {ago(d.lastWorkerRun)} · last mailbox sync {ago(d.mailboxes.last_synced)}</div>

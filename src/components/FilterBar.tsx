@@ -76,6 +76,13 @@ export default function FilterBar({ show = ['customer', 'mailbox', 'sentiment', 
 					value={filters.status} onChange={(v) => set({ status: v })}
 				/>
 			)}
+			{show.includes('type') && (
+				<MultiSelect
+					label="Email type" searchable
+					options={(data?.types || []).map((c: any) => ({ v: c.id, l: c.label }))}
+					value={filters.type} onChange={(v) => set({ type: v })}
+				/>
+			)}
 			{show.includes('category') && (
 				<MultiSelect
 					label="Issue type" searchable

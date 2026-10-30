@@ -366,4 +366,46 @@ create table if not exists oauth_states (
   created_at      timestamptz not null default now()
 );
 ` },
+{ id: '002_categories_views_microsoft', sql: String.raw`
+alter table users drop constraint if exists users_auth_provider_check;
+alter table users add constraint users_auth_provider_check check (auth_provider in ('local','ravity','microsoft'));
+alter table users add column if not exists ms_object_id text;
+alter table users add column if not exists email_aliases text[] not null default '{}';
+alter table users add column if not exists digest_enabled boolean not null default true;
+alter table users add column if not exists last_digest_at timestamptz;
+alter table users add column if not exists ravity_space_key text;
+
+alter table sessions add column if not exists iam_token_enc text;
+
+alter table emails add column if not exists is_automated boolean not null default false;
+
+alter table conversations add column if not exists business_category text not null default 'other';
+alter table conversations add column if not exists is_internal boolean not null default false;
+alter table conversations add column if not exists is_automated boolean not null default false;
+alter table conversations add column if not exists staff_participants text[] not null default '{}';
+alter table conversations add column if not exists proposal jsonb;
+alter table conversations add column if not exists proposal_stage text;
+alter table conversations add column if not exists proposal_stage_locked boolean not null default false;
+alter table conversations add column if not exists category_locked boolean not null default false;
+create index if not exists conv_bcat_idx on conversations (org_id, business_category, last_message_at desc);
+create index if not exists conv_staff_idx on conversations using gin (staff_participants);
+
+alter table action_items add column if not exists source text not null default 'ai';
+alter table action_items add column if not exists created_by bigint references users(id) on delete set null;
+alter table action_items add column if not exists reminder_sent_at timestamptz;
+alter table action_items add column if not exists notes text;
+alter table action_items alter column conversation_id drop not null;
+
+alter table alert_rules drop constraint if exists alert_rules_rule_type_check;
+alter table alert_rules add constraint alert_rules_rule_type_check check (rule_type in ('rag_red','negative_key_customer','escalation_risk','keyword','sla_breach','health_drop','action_overdue','proposal_deadline'));
+insert into alert_rules (org_id, name, rule_type, params, severity, channels, recipients)
+  select o.id, 'Action overdue', 'action_overdue', '{"days":1}', 'medium', '{in_app,email}', '{}' from organisations o
+   where not exists (select 1 from alert_rules r where r.org_id=o.id and r.rule_type='action_overdue');
+insert into alert_rules (org_id, name, rule_type, params, severity, channels, recipients)
+  select o.id, 'Proposal deadline within 2 days', 'proposal_deadline', '{"days":2}', 'high', '{in_app,email}', '{}' from organisations o
+   where not exists (select 1 from alert_rules r where r.org_id=o.id and r.rule_type='proposal_deadline');
+alter table customers add column if not exists kind text not null default 'customer';
+alter table customers add column if not exists kind_locked boolean not null default false;
+update conversations set needs_analysis = true;
+` },
 ];

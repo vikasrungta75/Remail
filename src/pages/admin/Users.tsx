@@ -24,7 +24,7 @@ export default function Users() {
 	const [link, setLink] = useState<string | null>(null);
 	const save = useMutation({
 		mutationFn: (u: any) => u.id
-			? api(`/users/${u.id}`, { method: 'PATCH', body: { role: u.role, fullName: u.full_name, isActive: u.is_active, allMailboxes: u.all_mailboxes, mailboxIds: u.mailbox_ids } })
+			? api(`/users/${u.id}`, { method: 'PATCH', body: { role: u.role, fullName: u.full_name, isActive: u.is_active, allMailboxes: u.all_mailboxes, mailboxIds: u.mailbox_ids, emailAliases: String(u.aliasesText ?? (u.email_aliases || []).join(', ')).split(',').map((x: string) => x.trim()).filter(Boolean) } })
 			: api('/users', { body: { email: u.email, fullName: u.full_name, role: u.role, allMailboxes: u.all_mailboxes, mailboxIds: u.mailbox_ids, authProvider: u.auth_provider } }),
 		onSuccess: (r) => { setEdit(null); qc.invalidateQueries({ queryKey: ['users'] }); toast('User saved'); if (r?.inviteLink) setLink(r.inviteLink); },
 		onError: (e: any) => toast(e.message, 'error'),
@@ -46,7 +46,7 @@ export default function Users() {
 										<td><b>{u.full_name}</b><div className="xs faint">{u.email}</div></td>
 										<td><span className={`badge ${u.role === 'admin' ? 'navy' : u.role === 'manager' ? 'purple' : u.role === 'analyst' ? 'blue' : ''}`}>{u.role}</span></td>
 										<td className="small">{u.all_mailboxes || u.role === 'admin' || u.role === 'manager' ? 'All mailboxes' : `${u.mailbox_ids.length} mailbox${u.mailbox_ids.length === 1 ? '' : 'es'}`}</td>
-										<td className="small">{u.auth_provider === 'ravity' ? 'Ravity sign-in' : 'Password'}</td>
+										<td className="small">{u.auth_provider === 'ravity' ? 'Ravity sign-in' : u.auth_provider === 'microsoft' ? 'Microsoft' : 'Password'}</td>
 										<td><span className={`badge ${u.is_active ? 'green' : ''}`}>{u.is_active ? 'Active' : 'Disabled'}</span></td>
 										<td className="small">{ago(u.last_login_at)}</td>
 										<td className="nowrap">
@@ -67,11 +67,13 @@ export default function Users() {
 					footer={<><button className="btn" onClick={() => setEdit(null)}>Cancel</button><button className="btn primary" disabled={save.isPending || (!edit.id && !edit.email)} onClick={() => save.mutate(edit)}>{edit.id ? 'Save' : 'Send invite'}</button></>}>
 					{!edit.id && <div className="field"><label>Email</label><input className="input" type="email" value={edit.email} onChange={(e) => setEdit({ ...edit, email: e.target.value })} /></div>}
 					<div className="field"><label>Full name</label><input className="input" value={edit.full_name} onChange={(e) => setEdit({ ...edit, full_name: e.target.value })} /></div>
+					{edit.id && <div className="field"><label>Other email addresses</label><input className="input" value={edit.aliasesText ?? (edit.email_aliases || []).join(', ')} onChange={(e) => setEdit({ ...edit, aliasesText: e.target.value })} /><span className="hint">Used to attribute replies and build this person's individual view.</span></div>}
 					{!edit.id && (
 						<div className="field"><label>Sign-in method</label>
 							<select className="input" value={edit.auth_provider} onChange={(e) => setEdit({ ...edit, auth_provider: e.target.value })}>
 								<option value="local">Password (invite link by email)</option>
 								<option value="ravity">Ravity sign-in (same as rfleet)</option>
+								<option value="microsoft">Sign in with Microsoft</option>
 							</select>
 						</div>
 					)}

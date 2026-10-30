@@ -15,6 +15,8 @@ const RULE_TYPES: Record<string, { label: string; help: string }> = {
 	keyword: { label: 'Watch-words', help: 'Customer emails containing any of the listed phrases.' },
 	sla_breach: { label: 'Reply SLA breach', help: 'Customer waiting longer than the set hours for a reply.' },
 	health_drop: { label: 'Customer health drop', help: 'Health score falls by at least the set number of points.' },
+	action_overdue: { label: 'Action overdue', help: 'An action owed by the team is past its due date by the set number of days. The owner is notified too.' },
+	proposal_deadline: { label: 'Proposal deadline approaching', help: 'An open quote or proposal is due within the set number of days.' },
 };
 
 export default function Alerts() {
@@ -116,6 +118,7 @@ export default function Alerts() {
 												{r.rule_type === 'escalation_risk' && ` ≥ ${r.params?.threshold ?? 70}`}
 												{r.rule_type === 'sla_breach' && ` > ${r.params?.hours ?? 4}h`}
 												{r.rule_type === 'health_drop' && ` ≥ ${r.params?.points ?? 15} pts`}
+												{(r.rule_type === 'action_overdue' || r.rule_type === 'proposal_deadline') && ` · ${r.params?.days ?? ''} day(s)`}
 												{r.rule_type === 'keyword' && <div className="xs faint clamp-2">{(r.params?.keywords || []).join(', ')}</div>}
 											</td>
 											<td><span className={`badge ${r.severity === 'critical' ? 'red' : r.severity === 'high' ? 'amber' : 'blue'}`}>{r.severity}</span></td>
@@ -156,6 +159,7 @@ export default function Alerts() {
 					</div>
 					{edit.rule_type === 'escalation_risk' && <div className="field"><label>Risk threshold (0 to 100)</label><input className="input" type="number" value={edit.params?.threshold ?? 70} onChange={(e) => setEdit({ ...edit, params: { threshold: Number(e.target.value) } })} /></div>}
 					{edit.rule_type === 'sla_breach' && <div className="field"><label>Hours without a reply</label><input className="input" type="number" value={edit.params?.hours ?? 4} onChange={(e) => setEdit({ ...edit, params: { hours: Number(e.target.value) } })} /></div>}
+					{(edit.rule_type === 'action_overdue' || edit.rule_type === 'proposal_deadline') && <div className="field"><label>Days</label><input className="input" type="number" value={edit.params?.days ?? (edit.rule_type === 'action_overdue' ? 1 : 2)} onChange={(e) => setEdit({ ...edit, params: { days: Number(e.target.value) } })} /></div>}
 					{edit.rule_type === 'health_drop' && <div className="field"><label>Drop of at least (points)</label><input className="input" type="number" value={edit.params?.points ?? 15} onChange={(e) => setEdit({ ...edit, params: { points: Number(e.target.value) } })} /></div>}
 					{edit.rule_type === 'negative_key_customer' && (
 						<div className="field"><label>Customer tiers</label>

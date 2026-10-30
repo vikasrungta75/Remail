@@ -32,6 +32,11 @@ function detectCategory(question: string): Category | null {
 export async function ask(user: SessionUser, question: string, qs: URLSearchParams) {
 	const org = await getOrg(user.orgId);
 	if (!qs.get('from')) qs.set('from', new Date(Date.now() - 30 * 86400_000).toISOString());
+	if (!qs.get('audience')) qs.set('audience', 'human');
+	// "proposals", "quotes", "internal", "vendors"… narrow to that type of email
+	const typeHints: [RegExp, string][] = [[/proposal|quote|rfq|rfp|tender|bid|pipeline/i, 'sales_proposal'], [/vendor|supplier|partner/i, 'vendor_partner'], [/internal|team thread/i, 'internal'], [/driver application|recruit|hiring|candidate/i, 'people_hr'], [/maintenance|breakdown|repair|eld|telematics/i, 'fleet_maintenance']];
+	const hint = typeHints.find(([re]) => re.test(question));
+	if (hint && !qs.get('type')) qs.set('type', hint[1]);
 	const f = await convFilter(user, qs);
 	const W = f.where.join(' and ');
 	const kws = keywords(question);
@@ -51,7 +56,7 @@ export async function ask(user: SessionUser, question: string, qs: URLSearchPara
 	}
 	const relevance = `(${[...kwConds, catCond].join(' + ') || '0'})`;
 	const matches = await q<any>(
-		`select c.id, c.subject, c.summary, c.rag, c.sentiment, c.urgency, c.escalation_risk, c.categories, c.last_message_at,
+		`select c.id, c.subject, c.summary, c.rag, c.sentiment, c.urgency, c.escalation_risk, c.categories, c.last_message_at, c.business_category, c.proposal_stage, c.proposal,
 		        c.awaiting_reply, c.status, cu.name as customer_name, cu.tier, cu.health_score, ${relevance} as relevance
 		   from conversations c left join customers cu on cu.id=c.customer_id
 		  where ${W} order by ${relevance} desc, c.priority_score desc, c.last_message_at desc limit 25`,
@@ -80,12 +85,12 @@ export async function ask(user: SessionUser, question: string, qs: URLSearchPara
 		`Customers at risk: ${atRisk.map((c) => `${c.name} (${c.tier}, health ${c.health_score}, ${c.health_status}, trend ${c.health_trend})`).join('; ') || 'none'}`,
 		`Open actions owed by us: ${actions.map((a) => `[#${a.conversation_id}] ${a.customer_name}: ${a.description}${a.due_date ? ` (due ${a.due_date})` : ''}`).join(' | ') || 'none'}`,
 		'Relevant conversations:',
-		...ctxConvs.map((c) => `[#${c.id}] ${c.customer_name || 'Unknown'} | ${c.rag || 'unrated'} | ${c.sentiment || ''} | ${c.status}${c.awaiting_reply ? ' | awaiting reply' : ''} | ${new Date(c.last_message_at).toISOString().slice(0, 10)} | ${c.subject}\n   ${c.summary || ''}`),
+		...ctxConvs.map((c) => `[#${c.id}] ${c.customer_name || 'Internal'} | ${c.business_category}${c.proposal_stage ? ` (${c.proposal_stage}${c.proposal?.deadline ? `, deadline ${c.proposal.deadline}` : ''})` : ''} | ${c.rag || 'unrated'} | ${c.sentiment || ''} | ${c.status}${c.awaiting_reply ? ' | awaiting reply' : ''} | ${new Date(c.last_message_at).toISOString().slice(0, 10)} | ${c.subject}\n   ${c.summary || ''}`),
 	].join('\n');
 
 	const llm = await askLLM(
 		user.orgId,
-		`You are Mail Sage, the assistant inside remail for ${org.name}'s customer service and operations leaders.
+		`You are Mail Sage, the assistant inside remail for ${org.name}, a trucking and fleet management company. You help managers and staff across customer service, sales and proposals, operations, fleet, finance and the internal team.
 Answer using ONLY the data provided. Be concise and specific: name customers, counts and dates. Cite conversations as [#id].
 If the data does not answer the question, say so and suggest which filter or view in remail would. British English. No emoji.`,
 		`Data:\n${context}\n\nQuestion: ${question}`,
@@ -126,5 +131,8 @@ export const SUGGESTED_QUESTIONS = [
 	'Which commitments are overdue?',
 	'Summarise delivery delay issues this week',
 	'Who is waiting longest for a reply?',
+	'Which proposals and quotes are due this week?',
+	'What are vendors and suppliers asking us for?',
+	'Summarise breakdown and maintenance issues',
 ];
 void CATEGORIES;

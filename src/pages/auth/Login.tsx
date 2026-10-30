@@ -1,4 +1,6 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
+import { api } from '../../api/client';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { MdVisibility, MdVisibilityOff } from 'react-icons/md';
 import { useAuth } from '../../contexts/AuthContext';
@@ -13,6 +15,23 @@ export default function Login() {
 	const [show, setShow] = useState(false);
 	const [busy, setBusy] = useState(false);
 	const [errors, setErrors] = useState<{ userid?: string; password?: string }>({});
+	const cfg = useQuery({ queryKey: ['auth-config'], queryFn: () => api('/auth/config') });
+	const [ssoError, setSsoError] = useState('');
+	const [msBusy, setMsBusy] = useState(false);
+	useEffect(() => {
+		const e = new URLSearchParams(window.location.search).get('error');
+		if (e) setSsoError(e);
+	}, []);
+	const microsoft = async () => {
+		setMsBusy(true);
+		try {
+			const r = await api('/auth/microsoft/start', { body: {} });
+			window.location.href = r.url;
+		} catch (e: any) {
+			setSsoError(e.message);
+			setMsBusy(false);
+		}
+	};
 
 	const submit = async (e: React.FormEvent) => {
 		e.preventDefault();
@@ -24,7 +43,7 @@ export default function Login() {
 		setBusy(true);
 		try {
 			await login(userid.trim(), password);
-			nav(loc.state?.from || '/overview', { replace: true });
+			nav(loc.state?.from || '/my-day', { replace: true });
 		} catch (err: any) {
 			setErrors({ password: err.message || 'Login failed. Please try again.' });
 		} finally {
@@ -35,6 +54,17 @@ export default function Login() {
 	return (
 		<AuthShell>
 			<h2>Sign in</h2>
+			{ssoError && <div className="notice error mb-16 small">{ssoError}</div>}
+			{cfg.data?.microsoft && (
+				<>
+					<button type="button" className="auth-btn" onClick={microsoft} disabled={msBusy}
+						style={{ background: '#fff', color: 'var(--text)', border: '1px solid #c9cde0', boxShadow: 'none', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10 }}>
+						<svg width="18" height="18" viewBox="0 0 21 21" aria-hidden="true"><rect x="1" y="1" width="9" height="9" fill="#f25022" /><rect x="11" y="1" width="9" height="9" fill="#7fba00" /><rect x="1" y="11" width="9" height="9" fill="#00a4ef" /><rect x="11" y="11" width="9" height="9" fill="#ffb900" /></svg>
+						{msBusy ? 'Redirecting…' : 'Sign in with Microsoft'}
+					</button>
+					<div className="row" style={{ margin: '18px 0', color: 'var(--text-3)', fontSize: 12 }}><span className="grow" style={{ height: 1, background: '#d9dcea' }} />or with your {cfg.data?.ravity ? 'Ravity' : 'remail'} account<span className="grow" style={{ height: 1, background: '#d9dcea' }} /></div>
+				</>
+			)}
 			<form onSubmit={submit} style={{ display: 'flex', flexDirection: 'column', gap: 16 }} noValidate>
 				<div className="field">
 					<label htmlFor="userid">Email address</label>

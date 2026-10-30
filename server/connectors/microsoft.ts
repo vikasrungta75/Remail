@@ -16,7 +16,6 @@ const GRAPH = 'https://graph.microsoft.com/v1.0';
 const LOGIN = 'https://login.microsoftonline.com';
 export const MS_DELEGATED_SCOPES = 'offline_access openid email profile User.Read Mail.Read';
 
-const tenant = () => process.env.MS_TENANT_ID || 'common';
 const clientId = () => required('MS_CLIENT_ID');
 const clientSecret = () => required('MS_CLIENT_SECRET');
 
@@ -28,17 +27,33 @@ function required(name: string) {
 
 export const microsoftConfigured = () => !!(process.env.MS_CLIENT_ID && process.env.MS_CLIENT_SECRET);
 
-export function microsoftAuthorizeUrl(state: string, redirectUri: string) {
+/**
+ * The customer tenant used for application (organisation-wide) access. Set either by the
+ * admin-consent flow (stored in organisation settings) or by MS_TENANT_ID.
+ */
+export async function orgTenant(orgId: number): Promise<string | null> {
+	const { getOrg } = await import('../settings');
+	const org = await getOrg(orgId);
+	return (org.settings as any).msTenantId || process.env.MS_TENANT_ID || null;
+}
+
+export function microsoftAuthorizeUrl(state: string, redirectUri: string, scope = MS_DELEGATED_SCOPES, prompt = 'select_account') {
 	const p = new URLSearchParams({
 		client_id: clientId(),
 		response_type: 'code',
 		redirect_uri: redirectUri,
 		response_mode: 'query',
-		scope: MS_DELEGATED_SCOPES,
+		scope,
 		state,
-		prompt: 'select_account',
+		prompt,
 	});
-	return `${LOGIN}/${process.env.MS_DELEGATED_TENANT || 'common'}/oauth2/v2.0/authorize?${p}`;
+	return `${LOGIN}/${process.env.MS_DELEGATED_TENANT || 'organizations'}/oauth2/v2.0/authorize?${p}`;
+}
+
+/** Admin consent: a Microsoft 365 administrator approves remail's read-only permissions for the whole tenant. */
+export function microsoftAdminConsentUrl(state: string, redirectUri: string, tenantHint = 'organizations') {
+	const p = new URLSearchParams({ client_id: clientId(), redirect_uri: redirectUri, state, scope: 'https://graph.microsoft.com/.default' });
+	return `${LOGIN}/${tenantHint}/v2.0/adminconsent?${p}`;
 }
 
 async function tokenRequest(body: Record<string, string>, tenantId: string) {
@@ -52,10 +67,14 @@ async function tokenRequest(body: Record<string, string>, tenantId: string) {
 	return data;
 }
 
+function decodeJwt(t: string): any {
+	try { return JSON.parse(Buffer.from(t.split('.')[1], 'base64url').toString('utf8')); } catch { return {}; }
+}
+
 export async function microsoftExchangeCode(code: string, redirectUri: string) {
 	const data = await tokenRequest(
 		{ grant_type: 'authorization_code', code, redirect_uri: redirectUri, scope: MS_DELEGATED_SCOPES },
-		process.env.MS_DELEGATED_TENANT || 'common',
+		process.env.MS_DELEGATED_TENANT || 'organizations',
 	);
 	const me = await graphGet(`${GRAPH}/me?$select=mail,userPrincipalName,displayName`, data.access_token);
 	return {
@@ -65,29 +84,72 @@ export async function microsoftExchangeCode(code: string, redirectUri: string) {
 	};
 }
 
-let appToken: { token: string; exp: number } | null = null;
+export const MS_SIGNIN_SCOPES = 'openid profile email User.Read';
+
+/** "Sign in with Microsoft": OpenID Connect sign-in for Wheel King staff with their work accounts. */
+export async function microsoftSignIn(code: string, redirectUri: string) {
+	const data = await tokenRequest(
+		{ grant_type: 'authorization_code', code, redirect_uri: redirectUri, scope: MS_SIGNIN_SCOPES },
+		process.env.MS_DELEGATED_TENANT || 'organizations',
+	);
+	const claims = decodeJwt(data.id_token || '');
+	const me = await graphGet(`${GRAPH}/me?$select=id,mail,userPrincipalName,displayName,jobTitle`, data.access_token);
+	return {
+		email: String(me.mail || me.userPrincipalName || claims.preferred_username || '').toLowerCase(),
+		fullName: me.displayName || claims.name || '',
+		objectId: String(me.id || claims.oid || ''),
+		tenantId: String(claims.tid || ''),
+	};
+}
+
+const appTokens = new Map<string, { token: string; exp: number }>();
+
+async function appAccessToken(tenantId: string) {
+	const cached = appTokens.get(tenantId);
+	if (cached && cached.exp > Date.now() + 60_000) return cached.token;
+	const data = await tokenRequest({ grant_type: 'client_credentials', scope: 'https://graph.microsoft.com/.default' }, tenantId);
+	appTokens.set(tenantId, { token: data.access_token, exp: Date.now() + data.expires_in * 1000 });
+	return data.access_token as string;
+}
 
 async function accessToken(mb: MailboxRow): Promise<{ token: string; credentials?: string }> {
 	if (mb.provider === 'microsoft_app') {
-		if (appToken && appToken.exp > Date.now() + 60_000) return { token: appToken.token };
-		const data = await tokenRequest(
-			{ grant_type: 'client_credentials', scope: 'https://graph.microsoft.com/.default' },
-			tenant(),
-		);
-		appToken = { token: data.access_token, exp: Date.now() + data.expires_in * 1000 };
-		return { token: data.access_token };
+		const t = await orgTenant(mb.org_id);
+		if (!t) throw new Error('Microsoft 365 is not connected for this organisation. An administrator must grant consent under Mailboxes.');
+		return { token: await appAccessToken(t) };
 	}
 	if (!mb.credentials_enc) throw new Error('Mailbox is not connected — reconnect it from Mailboxes');
 	const creds = JSON.parse(decrypt(mb.credentials_enc));
 	const data = await tokenRequest(
 		{ grant_type: 'refresh_token', refresh_token: creds.refresh_token, scope: MS_DELEGATED_SCOPES },
-		process.env.MS_DELEGATED_TENANT || 'common',
+		process.env.MS_DELEGATED_TENANT || 'organizations',
 	);
 	// Microsoft rotates refresh tokens; persist the new one
 	const rotated = data.refresh_token && data.refresh_token !== creds.refresh_token
 		? encrypt(JSON.stringify({ refresh_token: data.refresh_token }))
 		: undefined;
 	return { token: data.access_token, credentials: rotated };
+}
+
+/**
+ * Verify remail can read a mailbox with the organisation's consent and access policy.
+ * Returns ok=false with Microsoft's reason (e.g. the access policy denies it).
+ */
+export async function microsoftTestMailbox(orgId: number, address: string) {
+	const t = await orgTenant(orgId);
+	if (!t) return { ok: false, reason: 'Microsoft 365 is not connected yet. Grant administrator consent first.' };
+	try {
+		const token = await appAccessToken(t);
+		const inbox = await graphGet(`${GRAPH}/users/${encodeURIComponent(address)}/mailFolders/inbox?$select=displayName,totalItemCount,unreadItemCount`, token);
+		return { ok: true, totalItems: inbox.totalItemCount, unread: inbox.unreadItemCount };
+	} catch (e: any) {
+		const reason = e.status === 403
+			? 'Access denied. Add this mailbox to the remail application access policy (or RBAC management scope) in Exchange Online.'
+			: e.status === 404
+				? 'Mailbox not found in this tenant. Check the address, and that it is an Exchange Online mailbox.'
+				: e.message;
+		return { ok: false, reason };
+	}
 }
 
 async function graphGet(url: string, token: string, extraHeaders: Record<string, string> = {}): Promise<any> {
@@ -197,8 +259,10 @@ export async function microsoftSync(mb: MailboxRow, maxMessages = 300): Promise<
 }
 
 /** Optional: send a notification email from a dedicated mailbox (requires Mail.Send for that one mailbox). */
-export async function microsoftSendMail(from: string, to: string[], subject: string, html: string) {
-	const { token } = await accessToken({ provider: 'microsoft_app' } as MailboxRow);
+export async function microsoftSendMail(from: string, to: string[], subject: string, html: string, orgId = 1) {
+	const t = await orgTenant(orgId);
+	if (!t) throw new Error('Microsoft 365 is not connected for sending');
+	const token = await appAccessToken(t);
 	const res = await fetch(`${GRAPH}/users/${encodeURIComponent(from)}/sendMail`, {
 		method: 'POST',
 		headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },

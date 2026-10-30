@@ -1,5 +1,6 @@
 import { one, q } from './db';
 import { analyseThread } from './ai/llm';
+import { heuristicAnalyse } from './ai/heuristic';
 import type { ThreadInput } from './ai/types';
 import { getOrg } from './settings';
 import { score, healthScore, healthStatus } from './scoring';
@@ -11,7 +12,7 @@ const MAX_MESSAGES = 14;
 
 export async function analysePending(orgId: number, limit = 25, deadline = Date.now() + 60_000) {
 	const rows = await q<{ id: number }>(
-		`select id from conversations where org_id=$1 and needs_analysis and message_count > 0 and customer_id is not null
+		`select id from conversations where org_id=$1 and needs_analysis and message_count > 0
 		 order by last_message_at desc limit $2`,
 		[orgId, limit],
 	);
@@ -53,6 +54,8 @@ export async function analyseConversation(conversationId: number): Promise<numbe
 		customerName: conv.customer_name || '',
 		customerTier: conv.customer_tier || 'standard',
 		orgName: org.name,
+		isInternal: !conv.customer_id || conv.is_internal,
+		isAutomated: !!conv.is_automated,
 		messages: emails.map((e, idx) => {
 			const body = (e.body_clean || e.body_text || '').slice(0, 3000);
 			return {
@@ -68,7 +71,16 @@ export async function analyseConversation(conversationId: number): Promise<numbe
 		}),
 	};
 
-	const { analysis, model } = await analyseThread(input, org.id);
+	// Automated notifications never need an AI call — the rules engine is enough
+	const { analysis, model } = input.isAutomated
+		? { analysis: heuristicAnalyse(input), model: 'remail-heuristic-v1' }
+		: await analyseThread(input, org.id);
+	const external = !input.isInternal && !input.isAutomated;
+	if (!external) {
+		// internal and automated threads are not rated as customer risk
+		analysis.legal_or_churn_signal = false;
+		if (input.isAutomated) { analysis.action_items = []; analysis.issues = []; analysis.requires_reply = false; }
+	}
 
 	if (conv.awaiting_reply && !analysis.requires_reply) conv.awaiting_reply = false;
 	const hoursWaiting = conv.awaiting_reply && conv.last_inbound_at
@@ -86,14 +98,20 @@ export async function analyseConversation(conversationId: number): Promise<numbe
 	await q(
 		`update conversations set summary=$2, sentiment=$3, sentiment_score=$4, rag=$5, rag_reason=$6, customer_state=$7,
 		   urgency=$8, escalation_risk=$9, priority_score=$10, categories=$11, topics=$12, entities=$13, suggested_reply=$14,
-		   analysis_model=$15, analysed_at=now(), needs_analysis=false, awaiting_reply=$16, updated_at=now()
+		   analysis_model=$15, analysed_at=now(), needs_analysis=false, awaiting_reply=$16, updated_at=now(),
+		   business_category = case when category_locked then business_category else $17 end,
+		   proposal = $18,
+		   proposal_stage = case when proposal_stage_locked then proposal_stage else $19 end
 		 where id=$1`,
 		[
 			conversationId, analysis.summary, analysis.sentiment, analysis.sentiment_score, s.rag,
 			[...new Set([analysis.rag_reason, ...s.reasons])].filter((r, i, a) => !(i > 0 && /legal|cancellation/i.test(r) && /legal|cancellation/i.test(a[0]))).join(' · ').slice(0, 800),
 			s.customerState, analysis.urgency, analysis.escalation_risk, s.priority, analysis.categories,
 			analysis.topics, JSON.stringify(analysis.entities), analysis.requires_reply ? analysis.suggested_reply : null, model,
-			conv.awaiting_reply,
+			conv.awaiting_reply && external,
+			analysis.business_category,
+			analysis.proposal ? JSON.stringify(analysis.proposal) : null,
+			analysis.proposal?.stage ?? null,
 		],
 	);
 
@@ -119,10 +137,15 @@ export async function analyseConversation(conversationId: number): Promise<numbe
 		seen.push(fp);
 		const src = a.message_index !== null && a.message_index !== undefined ? input.messages[a.message_index]?.emailId : null;
 		await q(
-			`insert into action_items (org_id, conversation_id, customer_id, description, owner_side, owner_name, is_commitment, due_date, fingerprint, source_email_id)
-			 values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+			`insert into action_items (org_id, conversation_id, customer_id, description, owner_side, owner_name, is_commitment, due_date, fingerprint, source_email_id, assignee_id)
+			 values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,
+			   case when $5 = 'us' then coalesce(
+			     (select u.id from users u join emails e on e.id=$10 where u.org_id=$1 and u.is_active and $7 and (lower(u.email)=lower(e.from_address) or lower(e.from_address) = any(u.email_aliases)) limit 1),
+			     (select assignee_id from conversations where id=$2),
+			     (select m.created_by from emails e join mailboxes m on m.id=e.mailbox_id where e.id=$10 and m.provider in ('microsoft','gmail'))
+			   ) end)
 			 on conflict (conversation_id, fingerprint) do update set due_date = coalesce(excluded.due_date, action_items.due_date),
-			   owner_name = coalesce(excluded.owner_name, action_items.owner_name)`,
+			   owner_name = coalesce(excluded.owner_name, action_items.owner_name), assignee_id = coalesce(action_items.assignee_id, excluded.assignee_id)`,
 			[conv.org_id, conversationId, conv.customer_id, snippet(a.description, 400), a.owner_side, a.owner_name || null, a.is_commitment, a.due_date || null, fp, src],
 		);
 	}
@@ -131,7 +154,21 @@ export async function analyseConversation(conversationId: number): Promise<numbe
 		`select c.*, cu.name as customer_name, cu.tier as customer_tier from conversations c left join customers cu on cu.id=c.customer_id where c.id=$1`,
 		[conversationId],
 	);
-	await evaluateConversationAlerts(updated, analysis);
+	if (external) await evaluateConversationAlerts(updated, analysis);
+	// classify the external organisation: customer, prospect, vendor or partner (unless set by a person)
+	if (conv.customer_id) {
+		await q(
+			`update customers cu set kind = x.kind from (
+			   select case
+			     when count(*) filter (where business_category = 'vendor_partner') > count(*) / 2 then 'vendor'
+			     when count(*) filter (where business_category = 'sales_proposal') = count(*) and not exists (select 1 from conversations c2 where c2.customer_id=$1 and c2.business_category in ('customer_service','operations','billing_finance')) then 'prospect'
+			     when count(*) filter (where business_category = 'people_hr') = count(*) then 'candidate'
+			     else 'customer' end as kind
+			   from conversations where customer_id=$1) x
+			 where cu.id=$1 and not cu.kind_locked`,
+			[conv.customer_id],
+		);
+	}
 	return conv.customer_id;
 }
 

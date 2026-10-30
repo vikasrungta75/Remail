@@ -12,7 +12,7 @@ assert.equal(normalizeSubject('RE: Fwd: [EXT] Late delivery'), 'late delivery');
 assert.match(cleanBody('Thanks, done.\n\nOn Mon, 1 Jan 2026 at 10:00, Bob <b@x.com> wrote:\n> old text'), /^Thanks, done\.$/);
 assert.equal(redactPII('card 4111 1111 1111 1111'), 'card [card-number]');
 
-const a = heuristicAnalyse({ conversationId: 1, customerName: 'Acme', customerTier: 'key', orgName: 'WK', messages: [
+const a = heuristicAnalyse({ conversationId: 1, customerName: 'Acme', customerTier: 'key', orgName: 'WK', isInternal: false, isAutomated: false, messages: [
 	{ index: 0, emailId: 1, direction: 'inbound', from: 'a@acme.ca', fromName: 'A', sentAt: new Date().toISOString(), subject: 'Late again', body: 'This is unacceptable, the load is late again. If this continues we will switch supplier. Please confirm ETA urgently.' },
 ] });
 assert.equal(a.sentiment, 'negative');

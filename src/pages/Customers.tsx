@@ -9,20 +9,26 @@ import { useToast } from '../contexts/ToastContext';
 import FilterBar from '../components/FilterBar';
 import Chart from '../components/Chart';
 import { Card, Empty, Health, Kpi, Loader, Modal, PageHead, RagBar, RagDot, StateBadge, StatusBadge, TierBadge } from '../components/ui';
-import { COLORS, ago, catLabel, fmtDate } from '../lib/format';
+import { COLORS, KIND_LABELS, ago, catLabel, fmtDate } from '../lib/format';
 
 export default function Customers() {
 	const { params } = useFilters();
 	const nav = useNavigate();
 	const [q, setQ] = useState('');
 	const [state, setState] = useState<string>('all');
-	const { data, isLoading } = useQuery({ queryKey: ['customers', params, q], queryFn: () => api(`/customers${qs({ ...params, q })}`), refetchInterval: 60_000 });
+	const [kind, setKind] = useState<string>('customer');
+	const { data, isLoading } = useQuery({ queryKey: ['customers', params, q, kind], queryFn: () => api(`/customers${qs({ ...params, q, kind })}`), refetchInterval: 60_000 });
 	const rows = (data?.rows || []).filter((c: any) => state === 'all' || c.health_status === state || (state === 'risk' && ['at_risk', 'dissatisfied'].includes(c.health_status)));
 	const count = (s: string) => (data?.rows || []).filter((c: any) => c.health_status === s).length;
 
 	return (
 		<>
-			<PageHead kw="Customer" rest="health" sub="Health score blends sentiment, red and amber issues, overdue commitments and reply times over the last 30 days." />
+			<PageHead kw="Customers" rest="and accounts" sub="Health score blends sentiment, red and amber issues, overdue commitments and reply times over the last 30 days. Prospects, vendors and candidates are kept apart." />
+			<div className="tabs">
+				{[['customer', 'Customers'], ['prospect', 'Prospects'], ['vendor', 'Vendors and partners'], ['candidate', 'Candidates'], ['all', 'All organisations']].map(([k, l]) => (
+					<button key={k} className={kind === k ? 'on' : ''} onClick={() => setKind(k)}>{l}</button>
+				))}
+			</div>
 			<FilterBar show={['customer', 'mailbox', 'tier', 'category']} />
 			<div className="grid g-4 mb-16">
 				<Kpi label="Satisfied" value={count('satisfied')} accent={COLORS.green} onClick={() => setState('satisfied')} />
@@ -64,7 +70,7 @@ export default function Customers() {
 								{rows.map((c: any) => (
 									<tr key={c.id} className="click" onClick={() => nav(`/customers/${c.id}`)}>
 										<td>
-											<div className="row" style={{ fontWeight: 700 }}>{c.name} <TierBadge tier={c.tier} /></div>
+											<div className="row" style={{ fontWeight: 700 }}>{c.name} <TierBadge tier={c.tier} />{kind === 'all' && c.kind && <span className="chip">{KIND_LABELS[c.kind]}</span>}</div>
 											<div className="xs faint">{(c.domains || []).join(', ')}</div>
 										</td>
 										<td>
@@ -117,8 +123,8 @@ export function CustomerDetail() {
 			<button className="btn ghost sm mb-8" onClick={() => nav(-1)}><MdArrowBack /> Back</button>
 			<PageHead
 				kw={c.name}
-				sub={<span className="row wrap"><TierBadge tier={c.tier} /><StateBadge s={c.health_status} /> <span className="faint">{(c.domains || []).join(', ')} · account owner {c.account_owner || 'not set'} · last contact {ago(c.last_contact_at)}</span></span>}
-				actions={can('manager') && <button className="btn" onClick={() => { setForm({ name: c.name, tier: c.tier, domains: (c.domains || []).join(', '), accountOwner: c.account_owner || '', notes: c.notes || '' }); setEdit(true); }}><MdEdit /> Edit customer</button>}
+				sub={<span className="row wrap"><span className="chip">{KIND_LABELS[c.kind] || 'Customer'}</span><TierBadge tier={c.tier} /><StateBadge s={c.health_status} /> <span className="faint">{(c.domains || []).join(', ')} · account owner {c.account_owner || 'not set'} · last contact {ago(c.last_contact_at)}</span></span>}
+				actions={can('manager') && <button className="btn" onClick={() => { setForm({ name: c.name, tier: c.tier, kind: c.kind, domains: (c.domains || []).join(', '), accountOwner: c.account_owner || '', notes: c.notes || '' }); setEdit(true); }}><MdEdit /> Edit customer</button>}
 			/>
 			<div className="grid g-4 mb-16">
 				<Kpi label="Health score" value={c.health_score ?? 'n/a'} accent={COLORS.purple} delta={c.health_trend || null} foot="vs 7 days ago" />
@@ -183,6 +189,11 @@ export function CustomerDetail() {
 							<option value="strategic">Strategic</option><option value="key">Key</option><option value="standard">Standard</option>
 						</select>
 						<span className="hint">Strategic and key customers raise alerts sooner and rank higher in priority.</span>
+					</div>
+					<div className="field"><label>Type of organisation</label>
+						<select className="input" value={form.kind} onChange={(e) => setForm({ ...form, kind: e.target.value })}>
+							{Object.entries(KIND_LABELS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+						</select>
 					</div>
 					<div className="field"><label>Email domains</label><input className="input" value={form.domains} onChange={(e) => setForm({ ...form, domains: e.target.value })} /><span className="hint">Comma separated. New emails from these domains are linked to this customer.</span></div>
 					<div className="field"><label>Account owner</label><input className="input" value={form.accountOwner} onChange={(e) => setForm({ ...form, accountOwner: e.target.value })} /></div>

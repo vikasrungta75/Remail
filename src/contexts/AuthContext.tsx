@@ -11,6 +11,8 @@ export interface User {
 	allMailboxes: boolean;
 	timezone: string;
 	notifyEmail?: boolean;
+	digestEnabled?: boolean;
+	emailAliases?: string[];
 }
 
 interface AuthState {
@@ -18,6 +20,7 @@ interface AuthState {
 	orgName: string;
 	loading: boolean;
 	login: (userid: string, password: string) => Promise<void>;
+	loginWithToken: (token: string, loginTime?: string) => Promise<void>;
 	logout: () => Promise<void>;
 	refresh: () => Promise<void>;
 	can: (min: User['role']) => boolean;
@@ -74,6 +77,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 		await refresh();
 	};
 
+	const loginWithToken = async (token: string, loginTime?: string) => {
+		queryClient.clear();
+		store.set('token', token);
+		store.set('login_time', loginTime || new Date().toISOString());
+		setLoading(true);
+		await refresh();
+	};
+
 	const logout = async () => {
 		try {
 			await api('/auth/logout', { body: { loginTime: store.get('login_time') } });
@@ -85,7 +96,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
 	const can = (min: User['role']) => !!user && RANK[user.role] >= RANK[min];
 
-	return <AuthContext.Provider value={{ user, orgName, loading, login, logout, refresh, can }}>{children}</AuthContext.Provider>;
+	return <AuthContext.Provider value={{ user, orgName, loading, login, loginWithToken, logout, refresh, can }}>{children}</AuthContext.Provider>;
 }
 
 export const useAuth = () => useContext(AuthContext);

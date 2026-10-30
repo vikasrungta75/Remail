@@ -4,6 +4,7 @@ import { useQuery } from '@tanstack/react-query';
 import { MdMenu, MdMenuOpen, MdNotificationsNone, MdSearch, MdLogout, MdPerson, MdSync } from 'react-icons/md';
 import { menu, titleFor } from '../menu';
 import { useAuth } from '../contexts/AuthContext';
+import { useFilters } from '../contexts/FilterContext';
 import { api } from '../api/client';
 import { ago } from '../lib/format';
 
@@ -31,11 +32,14 @@ export default function Layout() {
 		return () => document.removeEventListener('mousedown', h);
 	}, []);
 
+	const { filters, set: setFilters } = useFilters();
+	const myday = useQuery({ queryKey: ['my-day'], queryFn: () => api('/views/my-day'), refetchInterval: 120_000 });
 	const alerts = useQuery({ queryKey: ['alert-counts'], queryFn: () => api('/alerts?status=open'), refetchInterval: 60_000 });
 	const summary = useQuery({ queryKey: ['nav-summary'], queryFn: () => api('/dashboard/summary'), refetchInterval: 120_000 });
 	const badge = (b?: string) => {
 		if (b === 'alerts') return alerts.data?.counts?.open || 0;
 		if (b === 'critical') return summary.data?.critical?.filter((c: any) => c.rag === 'red').length || 0;
+		if (b === 'myday') return (myday.data?.stats?.awaiting || 0) + (myday.data?.stats?.actionsOverdue || 0);
 		return 0;
 	};
 	const initials = (user?.fullName || user?.email || '?').split(/\s+/).map((w) => w[0]).slice(0, 2).join('').toUpperCase();
@@ -85,6 +89,10 @@ export default function Layout() {
 				<header className="header">
 					<button className="btn ghost icon mobile-menu" onClick={() => setMobileOpen(!mobileOpen)} aria-label="Open menu"><MdMenu /></button>
 					<div className="header-title">{titleFor(loc.pathname)}</div>
+					<div className="segmented" title="Individual view or the whole company">
+						<button className={filters.view === 'me' ? 'on' : ''} onClick={() => setFilters({ view: 'me' })}>My view</button>
+						<button className={filters.view !== 'me' ? 'on' : ''} onClick={() => setFilters({ view: 'all' })}>Everyone</button>
+					</div>
 					{summary.data?.sync?.last_synced_at && (
 						<span className="badge outline small" title="Last mailbox sync"><MdSync /> Synced {ago(summary.data.sync.last_synced_at)}</span>
 					)}
