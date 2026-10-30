@@ -47,7 +47,7 @@ Optional variables:
 Trigger a deploy. Once it finishes:
 
 1. Open the site and sign in with `ADMIN_EMAIL` / `ADMIN_PASSWORD`.
-2. Go to **Admin → Mailboxes → Connect my Outlook** to test with your own Microsoft email, or select **Load Wheel King demo data** to explore.
+2. Sign in with Microsoft: your inbox connects automatically. Demo data is off by default; set `DEMO_DATA_ENABLED=true` on a separate demo site to show **Load Wheel King demo data**.
 3. Under **Functions** in Netlify, confirm that `scheduler` runs every 5 minutes and that `worker-background` logs `[worker] done`.
 
 ## Sign-in modes

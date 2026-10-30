@@ -35,6 +35,11 @@ function Protected({ children, min }: { children: ReactNode; min?: 'viewer' | 'a
 	return <>{children}</>;
 }
 
+function Home() {
+	const { can } = useAuth();
+	return <Navigate to={can('manager') ? '/overview' : '/my-day'} replace />;
+}
+
 export default function App() {
 	const { user, loading } = useAuth();
 	return (
@@ -46,7 +51,7 @@ export default function App() {
 			{/* Ravity IAM reset links (same path rfleet uses) */}
 			<Route path="/home" element={<ResetPassword />} />
 			<Route element={<Protected><Layout /></Protected>}>
-				<Route path="/" element={<Navigate to="/my-day" replace />} />
+				<Route path="/" element={<Home />} />
 				<Route path="/overview" element={<Overview />} />
 				<Route path="/my-day" element={<MyDay />} />
 				<Route path="/all-email" element={<AllEmail />} />

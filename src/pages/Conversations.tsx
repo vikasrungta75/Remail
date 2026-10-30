@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import { MdSearch, MdAttachFile, MdContentCopy, MdChevronLeft, MdChevronRight } from 'react-icons/md';
 import { api, qs } from '../api/client';
 import { useFilters } from '../contexts/FilterContext';
@@ -136,10 +136,27 @@ export function ConversationList({ preset = {}, defaultSort = 'priority', showSe
 	);
 }
 
+/** One "Email" area: by category, needs attention, and every thread. */
+export function EmailTabs() {
+	const loc = useLocation();
+	const nav = useNavigate();
+	const tabs = [
+		{ path: '/all-email', label: 'By category' },
+		{ path: '/critical', label: 'Needs attention' },
+		{ path: '/conversations', label: 'All threads' },
+	];
+	return (
+		<div className="tabs">
+			{tabs.map((t) => <button key={t.path} className={loc.pathname === t.path ? 'on' : ''} onClick={() => nav(t.path)}>{t.label}</button>)}
+		</div>
+	);
+}
+
 export default function Conversations() {
 	return (
 		<>
-			<PageHead kw="Conversations" rest="across all mailboxes" sub="Every thread, of every type. Threads are rebuilt across mailboxes and duplicates are removed before analysis." />
+			<PageHead kw="Email" rest="threads" sub="Every thread, of every type. Threads are rebuilt across mailboxes and duplicates are removed before analysis." />
+			<EmailTabs />
 			<FilterBar show={['type', 'customer', 'mailbox', 'sentiment', 'rag', 'status', 'category', 'tier']} />
 			<ConversationList showAudience />
 		</>
@@ -149,7 +166,8 @@ export default function Conversations() {
 export function CriticalIssues() {
 	return (
 		<>
-			<PageHead kw="Critical" rest="issues" sub="Open red and amber conversations ranked by priority: rating, escalation risk, customer tier, urgency and time waiting." />
+			<PageHead kw="Email" rest="that needs attention" sub="Open red and amber threads ranked by priority: rating, escalation risk, customer tier, urgency and time waiting." />
+			<EmailTabs />
 			<FilterBar show={['customer', 'mailbox', 'category', 'tier']} />
 			<ConversationList preset={{ rag: ['red', 'amber'], status: ['open', 'in_progress'] }} />
 		</>

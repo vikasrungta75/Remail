@@ -69,7 +69,7 @@ export default function Layout() {
 								{items.map((i) => {
 									const n = badge(i.badge);
 									return (
-										<NavLink key={i.id} to={i.path} className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`} title={i.text}>
+										<NavLink key={i.id} to={i.path} className={({ isActive }) => `nav-item ${isActive || i.also?.some((p) => loc.pathname.startsWith(p)) ? 'active' : ''}`} title={i.text}>
 											<i.icon />
 											<span className="nav-label">{i.text}</span>
 											{n > 0 && <span className="nav-badge">{n}</span>}
@@ -89,10 +89,12 @@ export default function Layout() {
 				<header className="header">
 					<button className="btn ghost icon mobile-menu" onClick={() => setMobileOpen(!mobileOpen)} aria-label="Open menu"><MdMenu /></button>
 					<div className="header-title">{titleFor(loc.pathname)}</div>
-					<div className="segmented" title="Individual view or the whole company">
-						<button className={filters.view === 'me' ? 'on' : ''} onClick={() => setFilters({ view: 'me' })}>My view</button>
-						<button className={filters.view !== 'me' ? 'on' : ''} onClick={() => setFilters({ view: 'all' })}>Everyone</button>
-					</div>
+					{can('manager') && (
+						<div className="segmented" title="Your own email, or everyone's email combined">
+							<button className={filters.view === 'me' ? 'on' : ''} onClick={() => setFilters({ view: 'me' })}>My view</button>
+							<button className={filters.view !== 'me' ? 'on' : ''} onClick={() => setFilters({ view: 'all' })}>Management view</button>
+						</div>
+					)}
 					{summary.data?.sync?.last_synced_at && (
 						<span className="badge outline small" title="Last mailbox sync"><MdSync /> Synced {ago(summary.data.sync.last_synced_at)}</span>
 					)}

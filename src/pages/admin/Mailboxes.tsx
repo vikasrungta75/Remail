@@ -110,16 +110,16 @@ export default function Mailboxes() {
 					{!p.microsoftApp && <div className="xs faint mt-8">Available after step 1.</div>}
 				</Card>
 				<Card title={<h2><span className="kw">Your</span> own Outlook</h2>} accent={COLORS.pink}
-					sub="Personal, delegated Mail.Read. Perfect for testing and for your individual view.">
-					<div className="small muted mb-16">Sign in with your Microsoft work account. Only you and administrators see this mailbox; it powers My day.</div>
-					<button className="btn primary" disabled={!p.microsoft || connect.isPending} onClick={() => connect.mutate('microsoft')}><MsLogo /> Connect my Outlook</button>
+					sub="Read-only access to your own inbox">
+					<div className="small muted mb-16">Your inbox is connected automatically when you sign in with Microsoft. You, administrators and managers see its analysis. Use this button only to reconnect after an error.</div>
+					<button className="btn" disabled={!p.microsoft || connect.isPending} onClick={() => connect.mutate('microsoft')}><MsLogo /> Reconnect my Outlook</button>
 				</Card>
 			</div>
 			{can('admin') && (
 				<div className="row wrap mb-16">
 					<input ref={fileRef} type="file" accept=".eml,message/rfc822" multiple hidden onChange={(e) => e.target.files?.length && upload.mutate(e.target.files)} />
 					<button className="btn sm" onClick={() => fileRef.current?.click()} disabled={upload.isPending}><MdUpload /> {upload.isPending ? 'Importing…' : 'Import .eml files'}</button>
-					<button className="btn sm" onClick={() => demo.mutate(true)} disabled={demo.isPending}><MdScience /> {demo.isPending ? 'Loading…' : 'Load Wheel King demo data'}</button>
+					{data?.demoEnabled && <button className="btn sm" onClick={() => demo.mutate(true)} disabled={demo.isPending}><MdScience /> {demo.isPending ? 'Loading…' : 'Load Wheel King demo data'}</button>}
 					{p.google && <button className="btn sm" disabled={connect.isPending} onClick={() => connect.mutate('google')}><MdMail /> Connect Gmail</button>}
 				</div>
 			)}

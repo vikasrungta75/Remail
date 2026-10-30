@@ -4,6 +4,7 @@ import { MdArrowForward } from 'react-icons/md';
 import { api, qs } from '../api/client';
 import { useFilters } from '../contexts/FilterContext';
 import FilterBar from '../components/FilterBar';
+import { EmailTabs } from './Conversations';
 import Chart from '../components/Chart';
 import { Card, Kpi, Loader, PageHead, RagDot } from '../components/ui';
 import { BUSINESS_COLORS, BUSINESS_LABELS, COLORS, ago, fmtDate } from '../lib/format';
@@ -23,8 +24,9 @@ export default function AllEmail() {
 
 	return (
 		<>
-			<PageHead kw="All" rest="email at a glance"
+			<PageHead kw="Email" rest="by category"
 				sub="Every thread in every mailbox, sorted into business categories: customer issues, proposals, operations, finance, vendors, people and internal." />
+			<EmailTabs />
 			<FilterBar show={['mailbox', 'sentiment', 'rag', 'status']} />
 			{isLoading || !data ? <Loader /> : (
 				<>

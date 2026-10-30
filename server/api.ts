@@ -23,7 +23,7 @@ import { aiModel, aiProvider } from './ai/llm';
 import { appUrl, emailLayout, esc, mailerProvider, sendEmail } from './mailer';
 import { buildReport, runSchedule } from './reports';
 import { ask, SUGGESTED_QUESTIONS } from './copilot';
-import { loadDemoData, clearDemoData } from './demo';
+import { loadDemoData, clearDemoData, demoEnabled } from './demo';
 import { BUSINESS_CATEGORIES, BUSINESS_LABELS, CATEGORIES, CATEGORY_LABELS, PROPOSAL_STAGES } from './ai/types';
 import type { MailboxRow } from './connectors/types';
 
@@ -676,6 +676,7 @@ r.get('/api/mailboxes', async (ctx) => {
 	return {
 		rows,
 		providers: await providerStatus(ctx.user!.orgId),
+		demoEnabled: demoEnabled(),
 	};
 });
 
@@ -973,6 +974,7 @@ r.get('/api/system/status', async (ctx) => {
 
 r.post('/api/system/demo', async (ctx) => {
 	requireRole(ctx.user, 'admin');
+	if (!demoEnabled()) throw new HttpError(400, 'Demo data is switched off on this site (set DEMO_DATA_ENABLED=true to allow it)');
 	const res = await loadDemoData(ctx.user!.orgId, ctx.user!.id);
 	const analysed = await analysePending(ctx.user!.orgId, 400, Date.now() + 18_000);
 	await q(`update action_items a set status='done', completed_at=now() from conversations c

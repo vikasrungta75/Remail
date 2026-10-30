@@ -408,4 +408,14 @@ alter table customers add column if not exists kind text not null default 'custo
 alter table customers add column if not exists kind_locked boolean not null default false;
 update conversations set needs_analysis = true;
 ` },
+{ id: '003_remove_demo_data', sql: String.raw`
+-- one-time clean-up: remove the Wheel King demo dataset so only real mail remains
+delete from conversations where id in (
+  select distinct e.conversation_id from emails e join mailboxes m on m.id = e.mailbox_id
+   where m.provider = 'demo' and e.conversation_id is not null);
+delete from mailboxes where provider = 'demo';
+delete from customers c where not exists (select 1 from conversations v where v.customer_id = c.id);
+delete from alerts where conversation_id is null and customer_id is null;
+delete from action_items where conversation_id is null and source = 'demo';
+` },
 ];

@@ -1,7 +1,7 @@
 import type { IconType } from 'react-icons';
 import {
-	MdAutoAwesome, MdDashboard, MdPriorityHigh, MdNotificationsActive, MdBusiness, MdForum, MdChecklist,
-	MdInsights, MdAssessment, MdInbox, MdGroup, MdSettings, MdHistory, MdToday, MdAllInbox, MdRequestQuote, MdGroups,
+	MdAutoAwesome, MdDashboard, MdNotificationsActive, MdBusiness, MdForum, MdChecklist,
+	MdInsights, MdAssessment, MdInbox, MdGroup, MdSettings, MdHistory, MdToday, MdRequestQuote, MdGroups,
 } from 'react-icons/md';
 
 export interface MenuItem {
@@ -11,32 +11,27 @@ export interface MenuItem {
 	icon: IconType;
 	minRole?: 'viewer' | 'analyst' | 'manager' | 'admin';
 	badge?: 'alerts' | 'critical' | 'myday';
+	/** other paths that highlight this item */
+	also?: string[];
 }
 
 export const menu: { section: string; items: MenuItem[] }[] = [
 	{
-		section: 'Artificial intelligence',
+		section: 'My work',
 		items: [
-			{ id: 'sage', text: 'Mail Sage', path: '/mail-sage', icon: MdAutoAwesome },
 			{ id: 'myday', text: 'My day', path: '/my-day', icon: MdToday, badge: 'myday' },
+			{ id: 'sage', text: 'Mail Sage', path: '/mail-sage', icon: MdAutoAwesome },
 		],
 	},
 	{
-		section: 'Monitor',
+		section: 'Management',
 		items: [
-			{ id: 'overview', text: 'Customer health overview', path: '/overview', icon: MdDashboard },
-			{ id: 'all', text: 'All email', path: '/all-email', icon: MdAllInbox },
-			{ id: 'critical', text: 'Critical issues', path: '/critical', icon: MdPriorityHigh, badge: 'critical' },
-			{ id: 'alerts', text: 'Alerts', path: '/alerts', icon: MdNotificationsActive, badge: 'alerts' },
-		],
-	},
-	{
-		section: 'Work',
-		items: [
-			{ id: 'conversations', text: 'Conversations', path: '/conversations', icon: MdForum },
-			{ id: 'actions', text: 'Actions and commitments', path: '/actions', icon: MdChecklist },
-			{ id: 'proposals', text: 'Proposals and quotes', path: '/proposals', icon: MdRequestQuote },
+			{ id: 'overview', text: 'Overview', path: '/overview', icon: MdDashboard },
+			{ id: 'email', text: 'Email', path: '/all-email', also: ['/critical', '/conversations'], icon: MdForum, badge: 'critical' },
 			{ id: 'customers', text: 'Customers and accounts', path: '/customers', icon: MdBusiness },
+			{ id: 'proposals', text: 'Proposals and quotes', path: '/proposals', icon: MdRequestQuote },
+			{ id: 'actions', text: 'Actions and commitments', path: '/actions', icon: MdChecklist },
+			{ id: 'alerts', text: 'Alerts', path: '/alerts', icon: MdNotificationsActive, badge: 'alerts' },
 		],
 	},
 	{
@@ -59,7 +54,7 @@ export const menu: { section: string; items: MenuItem[] }[] = [
 ];
 
 export const titleFor = (path: string) => {
-	for (const s of menu) for (const i of s.items) if (path.startsWith(i.path)) return i.text;
+	for (const s of menu) for (const i of s.items) if ([i.path, ...(i.also || [])].some((p) => path.startsWith(p))) return i.text;
 	if (path.startsWith('/profile')) return 'My profile';
 	return 'remail';
 };

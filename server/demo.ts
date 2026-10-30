@@ -381,4 +381,8 @@ export async function clearDemoData(orgId: number) {
 	await q(`delete from mailboxes where org_id=$1 and provider='demo'`, [orgId]);
 	await q(`delete from customers c where org_id=$1 and not exists (select 1 from conversations v where v.customer_id=c.id)`, [orgId]);
 	await q(`delete from alerts a where org_id=$1 and conversation_id is null and customer_id is null`, [orgId]);
+	await q(`delete from action_items where org_id=$1 and conversation_id is null and source='demo'`, [orgId]).catch(() => {});
 }
+
+/** Demo data is for sales demos only; production keeps it off unless DEMO_DATA_ENABLED=true. */
+export const demoEnabled = () => process.env.DEMO_DATA_ENABLED === 'true';
