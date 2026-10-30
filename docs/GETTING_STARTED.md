@@ -22,7 +22,7 @@ remail uses **`gemini-3.8-flash`** by default. It's Google's current stable Flas
    * Publish directory: `dist`
    * Functions directory: `netlify/functions`
 4. Select **Deploy**. The first build may fail because there is no database yet. That's expected.
-5. Note your site URL, for example `https://remail-ravity.netlify.app`. You can rename it under **Project configuration → Change project name**. The examples below call it `https://YOUR-SITE.netlify.app`.
+5. Name the project **emailanalytics** under **Project configuration → Change project name**. The site is then `https://emailanalytics.netlify.app`, and every URL below uses that address.
 
 ## Step 3. Add Postgres (3 minutes)
 
@@ -39,12 +39,12 @@ This lets you sign in with Microsoft and connect vikas@ravity.io. You need to be
 1. Go to **https://entra.microsoft.com**, then **Applications → App registrations → New registration**.
    * Name: `remail by Ravity`
    * Supported account types: **Accounts in any organizational directory (Multitenant)**. This is needed later for Wheel King.
-   * Redirect URI: platform **Web**, value `https://YOUR-SITE.netlify.app/api/auth/microsoft/callback`
+   * Redirect URI: platform **Web**, value `https://emailanalytics.netlify.app/api/auth/microsoft/callback`
    * Select **Register**.
 2. On the app's **Overview**, copy the **Application (client) ID**.
 3. Go to **Authentication → Add URI** and add two more Web redirect URIs, then **Save**:
-   * `https://YOUR-SITE.netlify.app/api/connect/microsoft/callback`
-   * `https://YOUR-SITE.netlify.app/api/connect/microsoft-admin/callback`
+   * `https://emailanalytics.netlify.app/api/connect/microsoft/callback`
+   * `https://emailanalytics.netlify.app/api/connect/microsoft-admin/callback`
 4. Go to **Certificates & secrets → Client secrets → New client secret**. Name it `remail` and choose 24 months. Copy the **Value** immediately, because it's shown only once.
 5. Go to **API permissions → Add a permission → Microsoft Graph**:
    * **Delegated permissions:** `openid`, `profile`, `email`, `offline_access`, `User.Read`, `Mail.Read`
@@ -94,7 +94,7 @@ Optional:
 
 ## Step 7. Sign in and connect vikas@ravity.io (5 minutes)
 
-1. Open `https://YOUR-SITE.netlify.app`.
+1. Open `https://emailanalytics.netlify.app`.
 2. Either select **Sign in with Microsoft** and use vikas@ravity.io, or sign in with `ADMIN_EMAIL` and `ADMIN_PASSWORD`. Either way you are the administrator, because you are the first user.
 3. Go to **Admin → Mailboxes**. Under "When a new mailbox is connected, the first sync looks back", choose **30 days**.
 4. Under **Your own Outlook**, select **Connect my Outlook**, sign in as vikas@ravity.io and select **Accept**.
