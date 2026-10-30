@@ -55,6 +55,11 @@ export default function Login() {
 		<AuthShell>
 			<h2>Sign in</h2>
 			{ssoError && <div className="notice error mb-16 small">{ssoError}</div>}
+			{cfg.isError && (
+				<div className="notice warn mb-16 small">
+					<span>The server is not fully set up yet. Open <a href="/api/health" target="_blank" rel="noreferrer">the setup check</a> to see what is missing in Netlify.</span>
+				</div>
+			)}
 			{cfg.data?.microsoft && (
 				<>
 					<button type="button" className="auth-btn" onClick={microsoft} disabled={msBusy}

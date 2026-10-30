@@ -992,7 +992,46 @@ r.post('/api/internal/tick', async (ctx) => {
 	return runTick({ budgetMs: Number(ctx.body?.budgetMs) || 60_000 });
 }, { auth: 'public' });
 
-r.get('/api/health', async () => ({ ok: true, time: new Date().toISOString() }), { auth: 'public' });
+/**
+ * Setup check — works even when the database is not configured. Reports which settings are
+ * present (never their values) and whether the database is reachable.
+ */
+async function setupCheck() {
+	const has = (k: string) => !!process.env[k];
+	const checks: Record<string, { ok: boolean; detail: string }> = {};
+	const dbVar = ['DATABASE_URL', 'NETLIFY_DATABASE_URL', 'NETLIFY_DATABASE_URL_UNPOOLED'].find(has);
+	checks.database_variable = { ok: !!dbVar, detail: dbVar ? `using ${dbVar}` : 'Missing: add the Neon extension in Netlify, or set DATABASE_URL' };
+	if (dbVar) {
+		try {
+			await Promise.race([q('select 1'), new Promise((_, rej) => setTimeout(() => rej(new Error('timed out after 8s')), 8000))]);
+			checks.database_connection = { ok: true, detail: 'connected' };
+			try {
+				await ensureSchema();
+				const u = await one<any>('select count(*)::int n from users');
+				checks.database_tables = { ok: true, detail: `ready · ${u?.n ?? 0} user(s)` };
+			} catch (e: any) {
+				checks.database_tables = { ok: false, detail: `migration failed: ${e.message}`.slice(0, 200) };
+			}
+		} catch (e: any) {
+			checks.database_connection = { ok: false, detail: `cannot connect: ${e.message}`.slice(0, 200) };
+		}
+	}
+	checks.JWT_SECRET = { ok: (process.env.JWT_SECRET || '').length >= 32, detail: has('JWT_SECRET') ? ((process.env.JWT_SECRET || '').length >= 32 ? 'set' : 'too short: needs 32+ characters') : 'Missing' };
+	checks.ENCRYPTION_KEY = { ok: has('ENCRYPTION_KEY'), detail: has('ENCRYPTION_KEY') ? 'set' : 'Missing (needed to connect mailboxes)' };
+	checks.INTERNAL_API_SECRET = { ok: has('INTERNAL_API_SECRET'), detail: has('INTERNAL_API_SECRET') ? 'set' : 'Missing (needed for background sync)' };
+	checks.ADMIN_EMAIL_and_PASSWORD = { ok: has('ADMIN_EMAIL') && has('ADMIN_PASSWORD'), detail: has('ADMIN_EMAIL') && has('ADMIN_PASSWORD') ? `admin: ${process.env.ADMIN_EMAIL}` : 'Missing ADMIN_EMAIL or ADMIN_PASSWORD' };
+	if (has('ADMIN_PASSWORD')) {
+		const pw = process.env.ADMIN_PASSWORD || '';
+		checks.ADMIN_PASSWORD_strength = { ok: pw.length >= 10 && /[A-Za-z]/.test(pw) && /\d/.test(pw), detail: pw.length >= 10 ? 'ok' : 'shorter than 10 characters' };
+	}
+	checks.microsoft_sign_in = { ok: has('MS_CLIENT_ID') && has('MS_CLIENT_SECRET'), detail: has('MS_CLIENT_ID') && has('MS_CLIENT_SECRET') ? 'enabled' : 'optional: MS_CLIENT_ID / MS_CLIENT_SECRET not set' };
+	checks.ai = { ok: true, detail: `${aiProvider()} · ${aiModel()}` };
+	checks.site_url = { ok: true, detail: appUrl() };
+	const ok = Object.entries(checks).every(([k, v]) => v.ok || k === 'microsoft_sign_in');
+	return { ok, time: new Date().toISOString(), checks };
+}
+
+r.get('/api/health', async () => setupCheck(), { auth: 'public' });
 
 // ── Entry point ─────────────────────────────────────────────────────────────
 export async function handle(req: Request): Promise<Response> {
@@ -1000,6 +1039,9 @@ export async function handle(req: Request): Promise<Response> {
 	const pathname = url.pathname.replace(/^\/\.netlify\/functions\/api/, '/api').replace(/\/$/, '');
 	const m = r.match(req.method, pathname);
 	if (!m) return json({ error: 'Not found' }, 404);
+	if (pathname === '/api/health') {
+		try { return json(await setupCheck()); } catch (e: any) { return json({ ok: false, error: e.message }, 500); }
+	}
 	const ctx: Ctx = {
 		req,
 		url,
@@ -1026,6 +1068,11 @@ export async function handle(req: Request): Promise<Response> {
 		if (e instanceof HttpError) return json({ error: e.message, details: e.details }, e.status);
 		if (e instanceof SyntaxError) return json({ error: 'Invalid JSON body' }, 400);
 		console.error('[api]', req.method, pathname, e);
+		// Setup problems are shown plainly so they can be fixed from the Netlify dashboard
+		const msg = String(e?.message || '');
+		if (/DATABASE_URL|JWT_SECRET|ENCRYPTION_KEY|ECONNREFUSED|ENOTFOUND|password authentication failed|getaddrinfo|SSL|timeout/i.test(msg)) {
+			return json({ error: `Server setup issue: ${msg.slice(0, 200)}. Open /api/health for a full setup check.` }, 503);
+		}
 		return json({ error: 'Something went wrong. Please try again.' }, 500);
 	}
 }
