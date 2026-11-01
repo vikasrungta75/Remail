@@ -7,6 +7,13 @@ export interface OrgSettings {
 	analysisWindowDays: number;
 	ignoreAutomated: boolean;
 	reportTimezone: string;
+	/** Draft a complete reply for every email waiting on an answer */
+	autoDrafts: boolean;
+	/** Facts the AI may use in replies: transit times, rates, policies, contacts */
+	replyKnowledge: string;
+	replySignature: string;
+	/** Days of history read when a mailbox is first connected */
+	defaultBackfillDays: number;
 }
 
 export interface Org {
@@ -23,6 +30,10 @@ const DEFAULTS: OrgSettings = {
 	analysisWindowDays: 30,
 	ignoreAutomated: false,
 	reportTimezone: 'America/Toronto',
+	autoDrafts: true,
+	replyKnowledge: '',
+	replySignature: 'Kind regards,\nCustomer Service\nWheel King TransHaul',
+	defaultBackfillDays: 90,
 };
 
 const cache = new Map<number, { org: Org; at: number }>();

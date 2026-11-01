@@ -394,6 +394,37 @@ export async function verifyPassword(userId: number, pw: string) {
 // ── Sign in with Microsoft (Entra ID / Office 365 work accounts) ────────────
 export const microsoftSsoEnabled = () => !!(process.env.MS_CLIENT_ID && process.env.MS_CLIENT_SECRET) && process.env.MS_SSO !== 'false';
 
+// ── Sign in with Google (Google Workspace accounts) ────────────────────────
+export async function loginWithGoogle(ctx: Ctx, g: { email: string; fullName: string; sub: string; hostedDomain: string }) {
+	const org = await defaultOrgId();
+	const { getOrg } = await import('./settings');
+	const o = await getOrg(org, true);
+	if (!g.email) throw new HttpError(400, 'Your Google account has no email address');
+	let user = await one<any>('select * from users where lower(email)=$1 or google_sub=$2 or $1 = any(email_aliases) limit 1', [g.email, g.sub]);
+	if (!user) {
+		const domain = g.email.split('@')[1] || '';
+		const anyUser = await one('select id from users limit 1');
+		const allowedDomains = (process.env.GOOGLE_SSO_ALLOWED_DOMAINS || '').toLowerCase().split(',').map((x) => x.trim()).filter(Boolean);
+		const allowed = !anyUser || o.internalDomains.includes(domain) || allowedDomains.includes(domain) || (!!g.hostedDomain && allowedDomains.includes(g.hostedDomain));
+		if (!allowed) {
+			await audit(ctx, 'auth.login_failed', 'user', null, { provider: 'google', reason: 'not provisioned' }, { email: g.email });
+			throw new HttpError(403, 'Your Google account is not set up for this workspace yet. Ask an administrator to invite you.');
+		}
+		const bootstrapAdmins = (process.env.BOOTSTRAP_ADMIN_EMAILS || process.env.ADMIN_EMAIL || '').toLowerCase().split(',').map((x) => x.trim());
+		const def = process.env.GOOGLE_SSO_DEFAULT_ROLE as Role;
+		const role: Role = !anyUser || bootstrapAdmins.includes(g.email) ? 'admin' : (def in ROLE_RANK ? def : 'analyst');
+		user = await one<any>(
+			`insert into users (org_id, email, full_name, role, auth_provider, google_sub, all_mailboxes) values ($1,$2,$3,$4,'google',$5,$6) returning *`,
+			[org, g.email, g.fullName || g.email, role, g.sub, role === 'admin' || role === 'manager'],
+		);
+		await audit(ctx, 'user.provisioned', 'user', user.id, { provider: 'google', role }, user);
+	} else {
+		user = await one<any>('update users set google_sub=$2, full_name=coalesce(nullif(full_name,\'\'), $3) where id=$1 returning *', [user.id, g.sub, g.fullName]);
+	}
+	if (!user.is_active) throw new HttpError(403, 'This account is disabled');
+	return finishLogin(ctx, user);
+}
+
 export async function loginWithMicrosoft(ctx: Ctx, ms: { email: string; fullName: string; objectId: string; tenantId: string }) {
 	const org = await defaultOrgId();
 	const { getOrg } = await import('./settings');

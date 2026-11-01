@@ -5,6 +5,7 @@
  */
 import { q } from '../db';
 import { heuristicAnalyse } from './heuristic';
+import { normaliseSubcategory, taxonomyForPrompt } from './taxonomy';
 import { ANALYSIS_SCHEMA, BUSINESS_CATEGORIES, CATEGORIES, PROPOSAL_STAGES, type Analysis, type ThreadInput } from './types';
 
 export type Provider = 'gemini' | 'anthropic' | 'openai' | 'azure' | 'heuristic';
@@ -31,21 +32,35 @@ export function aiModel(): string {
 	}
 }
 
-const SYSTEM = (org: string) => `You are remail, an analyst for ${org}, a trucking and fleet management company (truckload, LTL, dispatch, cross-border Canada/US).
-You read every kind of business email thread at ${org} — customer issues, quotes and proposals, operations and dispatch, fleet maintenance, billing, compliance, vendors, people and internal team threads — and produce structured, factual analysis for managers and staff.
+const SYSTEM = (org: string) => `You are remail, an email analyst for ${org}, a trucking and fleet company (truckload, LTL, dedicated, cross-border Canada and US).
+You read every kind of business email thread at ${org}: customer issues, quotes and proposals, operations and dispatch, fleet maintenance, billing, compliance and claims, vendors, drivers and staff, and internal threads. Emails may be in English or French; always write your analysis in English.
 Rules:
-- Base everything strictly on the emails. Do not invent shipment numbers, dates, amounts or promises.
+- Base everything strictly on the emails. Do not invent load numbers, dates, rates, amounts or promises.
 - "inbound" messages are from the customer, "outbound" are from ${org} staff, "internal" are between ${org} staff.
 - Sentiment reflects the EXTERNAL party (customer, prospect or vendor), weighted to their most recent messages; for internal threads it reflects the overall tone. Polite but firm complaints are still negative.
 - For sales_proposal threads fill the proposal object (kind, stage, deadline, value, scope, next step).
-- RAG: red = dissatisfied customer with an urgent, repeated or high-impact problem, or any legal/churn/penalty signal; amber = a live concern or unanswered request that needs attention; green = routine, resolved or positive.
+- RAG: red = dissatisfied customer with an urgent, repeated or high-impact problem, or any legal, claim, churn or penalty signal; amber = a live concern or unanswered request that needs attention; green = routine, resolved or positive.
 - Action items: capture explicit commitments made by ${org} staff ("we will…", "I'll send…") with due dates when stated, and requests the customer is waiting on. Keep each under 25 words.
 - Dates: resolve relative dates ("tomorrow", "by Friday") against the message's sent time; output YYYY-MM-DD.
-- The suggested reply must be courteous, specific, British English, and use [placeholders] for any fact you do not know.`;
+- suggested_reply: when the external party is waiting for an answer (requires_reply true), write a COMPLETE reply ready to send, from the ${org} team, answering every question and request in their latest messages, in the language they wrote in (English or French). Professional, warm and concise. Close with the signature given below.
+- In the reply, NEVER guess a fact, rate, ETA, location, decision, policy or commitment you cannot see in the emails or in the reference information. Instead insert a placeholder in exactly this form: [[provide: what the team must fill in]]. Example: a request for a rate from Toronto to Chicago on a 53' dry van becomes "Our rate is [[provide: all-in rate for Toronto to Chicago, 53' dry van]]". Use as many placeholders as needed and keep each one short and specific. Never use square brackets inside a placeholder.
+- Never admit liability for damage, accidents or claims in a reply; acknowledge, open a case and state next steps.
+- Use facts from the reference information when they answer the question, instead of a placeholder.
+- When no reply is needed (requires_reply false), suggested_reply is an empty string.
+- Unsolicited marketing and sales pitches (advertising, SEO or lead-generation offers, software demos, factoring or load-board offers, trade-show promotions, webinars, platform notices) never need a reply: requires_reply false, business_category events_marketing (subgroup newsletter) or vendor_partner (subgroup vendor_offer).
+- subcategory: pick exactly one subgroup key from the list for the business_category you chose:
+${taxonomyForPrompt()}
+- Reply templates: when a default template is given for the subgroup you chose, follow its structure, order and wording closely, translating it if the customer wrote in French. Replace {{name}}, {{order_ref}}, {{unit}} and similar fields with facts from the emails, or with a [[provide: …]] placeholder when the fact is not known. Keep the template's own [[provide: …]] placeholders unless the emails or reference information answer them. Answer anything the customer asked that the template does not cover.
+- Rate, service, FAQ and policy entries given under "Matched reference data" are facts you may rely on. Prefer them over placeholders.`;
 
 function buildPrompt(input: ThreadInput): string {
 	const lines = [
+		input.replyKnowledge ? `Reference information from ${input.orgName} (use it in replies when relevant):\n${input.replyKnowledge.slice(0, 4000)}\n` : '',
+		input.reference?.length ? `Matched reference data:\n${input.reference.map((r) => `- [${r.kind}] ${r.title}: ${r.text}`).join('\n').slice(0, 4000)}\n` : '',
+		input.replyTemplates?.length ? `Default reply templates for the likely group (${input.replyTemplates[0].group}):\n${input.replyTemplates.map((t) => `### ${t.subgroup} (${t.label})\n${t.body}`).join('\n\n').slice(0, 6000)}\n` : '',
+		`Reply signature:\n${input.replySignature || `Regards,\n${input.orgName}`}\n`,
 		input.isInternal ? 'Thread type: internal (staff only, no external party)' : `External party: ${input.customerName || 'Unknown'} (tier: ${input.customerTier || 'standard'})`,
+		input.customerProfile ? `Customer database record (use it to address them and to avoid asking for details already on file): ${input.customerProfile}` : '',
 		`Conversation id: ${input.conversationId}`,
 		`Messages (oldest first):`,
 	];
@@ -57,7 +72,7 @@ function buildPrompt(input: ThreadInput): string {
 		);
 	}
 	lines.push('---', 'Analyse this conversation and call record_analysis.');
-	return lines.join('\n');
+	return lines.filter((l) => l !== '').join('\n');
 }
 
 async function logUsage(orgId: number | null, model: string, inTok: number, outTok: number, purpose: string) {
@@ -67,19 +82,36 @@ async function logUsage(orgId: number | null, model: string, inTok: number, outT
 }
 
 async function anthropicCall(body: any) {
-	const res = await fetch('https://api.anthropic.com/v1/messages', {
-		method: 'POST',
-		headers: {
-			'x-api-key': process.env.ANTHROPIC_API_KEY!,
-			'anthropic-version': '2023-06-01',
-			'content-type': 'application/json',
-		},
-		body: JSON.stringify(body),
-		signal: AbortSignal.timeout(60_000),
-	});
-	const data: any = await res.json();
-	if (!res.ok) throw new Error(`Anthropic ${res.status}: ${data?.error?.message || 'error'}`);
-	return data;
+	await pace();
+	for (let i = 0; i < 4; i++) {
+		const res = await fetch(`${(process.env.ANTHROPIC_BASE_URL || 'https://api.anthropic.com').replace(/\/$/, '')}/v1/messages`, {
+			method: 'POST',
+			headers: {
+				'x-api-key': process.env.ANTHROPIC_API_KEY!,
+				'anthropic-version': '2023-06-01',
+				'content-type': 'application/json',
+			},
+			body: JSON.stringify(body),
+			signal: AbortSignal.timeout(120_000),
+		});
+		const data: any = await res.json().catch(() => ({}));
+		if (res.status === 429 || res.status === 529 || res.status >= 500) {
+			const retry = Number(res.headers.get('retry-after') || 0);
+			if (retry > 60) throw new QuotaError(`Claude ${res.status}: ${data?.error?.message || 'rate limited'}`, retry);
+			await new Promise((r) => setTimeout(r, Math.max(2000 * 2 ** i, retry * 1000)));
+			continue;
+		}
+		if (!res.ok) {
+			const msg = data?.error?.message || 'error';
+			// a wrong or revoked key fails every call: pause and say so, instead of failing thousands of threads one by one
+			if (res.status === 401 || res.status === 403) throw new QuotaError(`Claude rejected the API key (${res.status}: ${msg}). Check ANTHROPIC_API_KEY in Netlify, then redeploy.`, 900);
+			// out of credit or spend limit reached: pause instead of failing every thread
+			if (res.status === 400 && /credit balance|spend limit|billing/i.test(msg)) throw new QuotaError(`Claude: ${msg}`, 3600);
+			throw new Error(`Claude ${res.status}: ${msg}`);
+		}
+		return data;
+	}
+	throw new QuotaError('Claude kept returning rate-limit or overload errors', 120);
 }
 
 /**
@@ -88,6 +120,33 @@ async function anthropicCall(body: any) {
  * (the schema is also described in the prompt), so a Gemini API change never breaks analysis.
  */
 let lastAiCall = 0;
+
+/** Gemini said the quota is used up. `retryAfterSecs` null = a daily quota (resets at midnight Pacific time). */
+export class QuotaError extends Error {
+	constructor(message: string, public retryAfterSecs: number | null) { super(message); }
+}
+let pauseCache = { until: 0, at: 0 };
+async function aiPausedUntil(): Promise<number> {
+	if (Date.now() - pauseCache.at < 20_000) return pauseCache.until;
+	const r = await q<any>('select paused_until from ai_state where id=1 and (provider is null or provider=$1)', [aiProvider()]).catch(() => []);
+	pauseCache = { until: r[0]?.paused_until ? new Date(r[0].paused_until).getTime() : 0, at: Date.now() };
+	return pauseCache.until;
+}
+export const aiPaused = async () => (await aiPausedUntil()) > Date.now();
+async function recordAiError(e: any) {
+	let until: Date | null = null;
+	if (e instanceof QuotaError) {
+		if (e.retryAfterSecs === null) {
+			// daily quotas reset at midnight Pacific time
+			const now = new Date();
+			const pt = new Date(now.toLocaleString('en-US', { timeZone: 'America/Los_Angeles' }));
+			const next = new Date(pt); next.setHours(24, 5, 0, 0);
+			until = new Date(now.getTime() + (next.getTime() - pt.getTime()));
+		} else until = new Date(Date.now() + Math.max(60, e.retryAfterSecs) * 1000);
+	}
+	await q(`update ai_state set last_error=$1, last_error_at=now(), paused_until=coalesce($2, paused_until), provider=$3 where id=1`, [String(e.message).slice(0, 500), until, aiProvider()]).catch(() => {});
+	if (until) pauseCache = { until: until.getTime(), at: Date.now() };
+}
 /** Optional pacing for free-tier quotas: AI_MIN_INTERVAL_MS=6000 ≈ 10 requests a minute. */
 async function pace() {
 	const gap = Number(process.env.AI_MIN_INTERVAL_MS || 0);
@@ -122,16 +181,26 @@ async function geminiCall(opts: { system: string; prompt: string; schema?: objec
 				signal: AbortSignal.timeout(90_000),
 			});
 			const data: any = await res.json().catch(() => ({}));
-			if (res.status === 429 || res.status >= 500) {
+			if (res.status === 429) {
+				const msg = String(data?.error?.message || '');
+				const retry = (data?.error?.details || []).find((d: any) => String(d['@type'] || '').includes('RetryInfo'))?.retryDelay;
+				const secs = retry ? parseFloat(String(retry)) : NaN;
+				// a daily quota, or a long retry delay: stop now and pause, retrying only wastes the quota
+				if (/per ?day|PerDay|daily/i.test(msg) || secs > 60) throw new QuotaError(msg || 'Gemini quota reached', /per ?day|PerDay|daily/i.test(msg) ? null : secs);
+				await new Promise((r) => setTimeout(r, Math.max(2000 * 2 ** i, (secs || 0) * 1000)));
+				continue;
+			}
+			if (res.status >= 500) {
 				await new Promise((r) => setTimeout(r, 2000 * 2 ** i));
 				continue;
 			}
 			return { res, data };
 		}
-		throw new Error('Gemini kept returning rate-limit or server errors');
+		throw new QuotaError('Gemini kept returning rate-limit errors (429)', 120);
 	};
 	let { res, data } = await attempt(true);
 	if (!res.ok && res.status === 400 && opts.schema) ({ res, data } = await attempt(false));
+	if (res.status === 401 || res.status === 403) throw new QuotaError(`Gemini rejected the API key (${res.status}: ${data?.error?.message || 'error'}). Check GEMINI_API_KEY in Netlify.`, 900);
 	if (!res.ok) throw new Error(`Gemini ${res.status}: ${data?.error?.message || 'error'}`);
 	const cand = data.candidates?.[0];
 	const text = (cand?.content?.parts || []).filter((p: any) => !p.thought).map((p: any) => p.text || '').join('');
@@ -186,6 +255,7 @@ function coerce(raw: any, fallback: Analysis): Analysis {
 		: bc === 'sales_proposal' ? fallback.proposal : null;
 	return {
 		business_category: bc,
+		subcategory: normaliseSubcategory(bc, raw.subcategory || (bc === fallback.business_category ? fallback.subcategory : '')),
 		proposal: pr,
 		summary: String(raw.summary || fallback.summary).slice(0, 1200),
 		sentiment: pick(raw.sentiment, ['positive', 'neutral', 'negative'] as const, fallback.sentiment),
@@ -242,6 +312,7 @@ export async function analyseThread(input: ThreadInput, orgId: number): Promise<
 	const provider = aiProvider();
 	if (provider === 'heuristic') return { analysis: fallback, model: 'remail-heuristic-v1' };
 	const model = aiModel();
+	if (await aiPaused()) return { analysis: fallback, model: 'remail-heuristic-v1 (fallback)' };
 	try {
 		if (provider === 'gemini') {
 			const r = await geminiCall({
@@ -256,8 +327,9 @@ export async function analyseThread(input: ThreadInput, orgId: number): Promise<
 		if (provider === 'anthropic') {
 			const data = await anthropicCall({
 				model,
-				max_tokens: 2500,
-				system: SYSTEM(input.orgName),
+				max_tokens: 6000,
+				// the system prompt is identical for every thread, so it is cached
+				system: [{ type: 'text', text: SYSTEM(input.orgName), cache_control: { type: 'ephemeral' } }],
 				tools: [{ name: 'record_analysis', description: 'Record the structured analysis of the email conversation.', input_schema: ANALYSIS_SCHEMA }],
 				tool_choice: { type: 'tool', name: 'record_analysis' },
 				messages: [{ role: 'user', content: buildPrompt(input) }],
@@ -283,8 +355,30 @@ export async function analyseThread(input: ThreadInput, orgId: number): Promise<
 		return { analysis: coerce(JSON.parse(args), fallback), model };
 	} catch (e: any) {
 		console.error('[ai] analysis failed, using heuristic fallback:', e.message);
+		await recordAiError(e);
 		return { analysis: fallback, model: 'remail-heuristic-v1 (fallback)' };
 	}
+}
+
+/** Structured extraction with a JSON schema (tool call), for any provider. Returns null when no LLM is configured. */
+export async function extractJson(orgId: number, system: string, prompt: string, schema: object, name = 'record'): Promise<any | null> {
+	const provider = aiProvider();
+	if (provider === 'heuristic') return null;
+	const model = aiModel();
+	if (provider === 'gemini') {
+		const r = await geminiCall({ system, prompt: `${prompt}\n\nReturn ONLY a JSON object.`, schema, maxTokens: 2048 });
+		await logUsage(orgId, model, r.usage.promptTokenCount, (r.usage.candidatesTokenCount || 0) + (r.usage.thoughtsTokenCount || 0), name);
+		return parseJsonLoose(r.text);
+	}
+	if (provider === 'anthropic') {
+		const data = await anthropicCall({ model, max_tokens: 1500, system, tools: [{ name, description: 'Record the extracted fields.', input_schema: schema }], tool_choice: { type: 'tool', name }, messages: [{ role: 'user', content: prompt }] });
+		await logUsage(orgId, model, data.usage?.input_tokens, data.usage?.output_tokens, name);
+		return (data.content || []).find((c: any) => c.type === 'tool_use')?.input || null;
+	}
+	const data = await openaiCall({ model, temperature: 0, messages: [{ role: 'system', content: system }, { role: 'user', content: prompt }], tools: [{ type: 'function', function: { name, description: 'Record the extracted fields.', parameters: schema } }], tool_choice: { type: 'function', function: { name } } });
+	await logUsage(orgId, model, data.usage?.prompt_tokens, data.usage?.completion_tokens, name);
+	const args = data.choices?.[0]?.message?.tool_calls?.[0]?.function?.arguments;
+	return args ? JSON.parse(args) : null;
 }
 
 /** Free-text answer for the Mail Sage copilot. Returns null when no LLM is configured. */

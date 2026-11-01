@@ -28,7 +28,7 @@ export default function Mailboxes() {
 	const [add, setAdd] = useState(false);
 	const [addr, setAddr] = useState('');
 	const [name, setName] = useState('');
-	const [backfill, setBackfill] = useState(30);
+	const [backfill, setBackfill] = useState(90);
 	const fileRef = useRef<HTMLInputElement>(null);
 	const { data, isLoading } = useQuery({ queryKey: ['mailboxes'], queryFn: () => api('/mailboxes'), refetchInterval: 15_000 });
 	const refresh = () => { qc.invalidateQueries(); };
@@ -87,10 +87,10 @@ export default function Mailboxes() {
 	const p = data?.providers || {};
 	return (
 		<>
-			<PageHead kw="Mailboxes" rest="and connections" sub="remail reads email with read-only permissions. It never sends, moves or deletes anything in a monitored mailbox." />
+			<PageHead kw="Mailboxes" rest="and connections" sub="remail reads email for analysis and never moves or deletes anything. A reply is sent from Outlook only when a person reviews it and presses Send." />
 			<div className="grid g-3 mb-16">
 				<Card title={<h2><span className="kw">1.</span> Connect Microsoft 365</h2>} accent={COLORS.general}
-					sub="Organisation-wide, read-only (Mail.Read). Done once by a Microsoft 365 administrator.">
+					sub="Organisation-wide: Mail.Read, plus Mail.Send for reviewed replies. Done once by a Microsoft 365 administrator.">
 					{p.microsoftApp ? (
 						<div className="notice ok small"><MdCheckCircle /><span>Connected to tenant <span className="mono">{p.msTenantId}</span>{p.msConsentedBy ? ` · approved by ${p.msConsentedBy}` : ''}</span></div>
 					) : (

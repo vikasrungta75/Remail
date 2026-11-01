@@ -14,7 +14,9 @@ import type { MailboxRow, NormalizedMessage, SyncBatch } from './types';
 
 const GRAPH = 'https://graph.microsoft.com/v1.0';
 const LOGIN = 'https://login.microsoftonline.com';
-export const MS_DELEGATED_SCOPES = 'offline_access openid email profile User.Read Mail.Read';
+/** Replies are sent from Outlook only when MS_SEND_ENABLED is not 'false'; staff must then consent to Mail.Send at sign-in. */
+export const microsoftSendEnabled = () => process.env.MS_SEND_ENABLED !== 'false';
+export const MS_DELEGATED_SCOPES = `offline_access openid email profile User.Read Mail.Read${process.env.MS_SEND_ENABLED !== 'false' ? ' Mail.Send' : ''}`;
 
 const clientId = () => required('MS_CLIENT_ID');
 const clientSecret = () => required('MS_CLIENT_SECRET');
@@ -128,10 +130,10 @@ async function accessToken(mb: MailboxRow): Promise<{ token: string; credentials
 	}
 	if (!mb.credentials_enc) throw new Error('Mailbox is not connected — reconnect it from Mailboxes');
 	const creds = JSON.parse(decrypt(mb.credentials_enc));
-	const data = await tokenRequest(
-		{ grant_type: 'refresh_token', refresh_token: creds.refresh_token, scope: MS_DELEGATED_SCOPES },
-		process.env.MS_DELEGATED_TENANT || 'organizations',
-	);
+	const tenant = process.env.MS_DELEGATED_TENANT || 'organizations';
+	// people who connected before sending was switched on consented to Mail.Read only: keep their sync working
+	const data = await tokenRequest({ grant_type: 'refresh_token', refresh_token: creds.refresh_token, scope: MS_DELEGATED_SCOPES }, tenant)
+		.catch(() => tokenRequest({ grant_type: 'refresh_token', refresh_token: creds.refresh_token, scope: MS_DELEGATED_SCOPES.replace(' Mail.Send', '') }, tenant));
 	// Microsoft rotates refresh tokens; persist the new one
 	const rotated = data.refresh_token && data.refresh_token !== creds.refresh_token
 		? encrypt(JSON.stringify({ refresh_token: data.refresh_token }))
@@ -284,4 +286,42 @@ export async function microsoftSendMail(from: string, to: string[], subject: str
 		}),
 	});
 	if (!res.ok) throw new Error(`Graph sendMail ${res.status}: ${await res.text()}`);
+}
+
+/**
+ * Sends a reviewed reply from the mailbox the customer wrote to, as a reply in the same Outlook conversation.
+ * Graph creates the reply (with the quoted thread), we put our text above the quote, then send it.
+ * Shared mailboxes need the Mail.Send application permission (limited by the same access policy as Mail.Read);
+ * personal mailboxes need the delegated Mail.Send consent given at sign-in.
+ */
+export async function microsoftSendReply(mb: MailboxRow, m: { to: string[]; cc: string[]; subject: string; html: string; replyToProviderId?: string | null }) {
+	if (!microsoftSendEnabled()) throw new Error('Sending from Outlook is switched off (MS_SEND_ENABLED=false)');
+	const { token } = await accessToken(mb);
+	const base = mb.provider === 'microsoft_app' ? `${GRAPH}/users/${encodeURIComponent(mb.address)}` : `${GRAPH}/me`;
+	const call = async (method: string, url: string, body?: unknown) => {
+		const res = await fetch(url, { method, headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
+		if (!res.ok) {
+			const text = await res.text();
+			if (res.status === 403) throw new Error(mb.provider === 'microsoft_app'
+				? 'This mailbox is not allowed to send yet. Grant the Mail.Send application permission to remail and include the mailbox in the application access policy.'
+				: 'Your Outlook connection does not allow sending yet. Sign out and sign in with Microsoft again to grant it.');
+			throw new Error(`Outlook send failed (${res.status}): ${text.slice(0, 300)}`);
+		}
+		return res.status === 202 || res.status === 204 ? null : res.json();
+	};
+	const recipients = (list: string[]) => list.map((address) => ({ emailAddress: { address } }));
+	if (!m.replyToProviderId) {
+		await call('POST', `${base}/sendMail`, { message: { subject: m.subject, body: { contentType: 'HTML', content: m.html }, toRecipients: recipients(m.to), ccRecipients: recipients(m.cc) }, saveToSentItems: true });
+		return { id: '', threadId: '' };
+	}
+	const draft: any = await call('POST', `${base}/messages/${encodeURIComponent(m.replyToProviderId)}/createReply`, {});
+	const quoted = draft?.body?.content || '';
+	await call('PATCH', `${base}/messages/${encodeURIComponent(draft.id)}`, {
+		subject: m.subject,
+		toRecipients: recipients(m.to),
+		ccRecipients: recipients(m.cc),
+		body: { contentType: 'HTML', content: `${m.html}<br>${quoted}` },
+	});
+	await call('POST', `${base}/messages/${encodeURIComponent(draft.id)}/send`);
+	return { id: draft.id as string, threadId: draft.conversationId as string };
 }

@@ -46,7 +46,7 @@ export default function Users() {
 										<td><b>{u.full_name}</b><div className="xs faint">{u.email}</div></td>
 										<td><span className={`badge ${u.role === 'admin' ? 'navy' : u.role === 'manager' ? 'purple' : u.role === 'analyst' ? 'blue' : ''}`}>{u.role}</span></td>
 										<td className="small">{u.all_mailboxes || u.role === 'admin' || u.role === 'manager' ? 'All mailboxes' : `${u.mailbox_ids.length} mailbox${u.mailbox_ids.length === 1 ? '' : 'es'}`}</td>
-										<td className="small">{u.auth_provider === 'ravity' ? 'Ravity sign-in' : u.auth_provider === 'microsoft' ? 'Microsoft' : 'Password'}</td>
+										<td className="small">{u.auth_provider === 'ravity' ? 'Ravity sign-in' : u.auth_provider === 'google' ? 'Google' : u.auth_provider === 'microsoft' ? 'Microsoft' : 'Password'}</td>
 										<td><span className={`badge ${u.is_active ? 'green' : ''}`}>{u.is_active ? 'Active' : 'Disabled'}</span></td>
 										<td className="small">{ago(u.last_login_at)}</td>
 										<td className="nowrap">
@@ -74,6 +74,7 @@ export default function Users() {
 								<option value="local">Password (invite link by email)</option>
 								<option value="ravity">Ravity sign-in (same as rfleet)</option>
 								<option value="microsoft">Sign in with Microsoft</option>
+								<option value="google">Sign in with Google</option>
 							</select>
 						</div>
 					)}

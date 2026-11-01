@@ -32,13 +32,16 @@ export async function convFilter(user: SessionUser, qs: URLSearchParams, opts: {
 	else if (audience === 'human') f.where.push(`not c.is_automated`);
 	const types = listParam(qs.get('type'));
 	if (types.length) f.where.push(`c.business_category = any(${p(f, types)})`);
+	const subs = listParam(qs.get('sub'));
+	if (subs.length) f.where.push(`c.subcategory = any(${p(f, subs)})`);
 	// individual view: threads I took part in, am assigned to, or that came from a mailbox I connected
 	if (qs.get('view') === 'me') {
 		const ids = [user.email.toLowerCase(), ...((await one<any>('select email_aliases from users where id=$1', [user.id]))?.email_aliases || [])];
 		const me = p(f, ids);
 		const uid = p(f, user.id);
 		f.where.push(`(c.participants && ${me}::text[] or c.staff_participants && ${me}::text[] or c.assignee_id = ${uid}
-			or c.mailbox_ids && (select coalesce(array_agg(id), '{}') from mailboxes where created_by = ${uid} and provider in ('microsoft','gmail')))`);
+			or c.mailbox_ids && (select coalesce(array_agg(id), '{}') from mailboxes where created_by = ${uid})
+			or c.mailbox_ids && (select coalesce(array_agg(mailbox_id), '{}') from user_mailboxes where user_id = ${uid}))`);
 	}
 	const scope = await mailboxScope(user);
 	if (scope) f.where.push(`c.mailbox_ids && ${p(f, scope)}::bigint[]`);

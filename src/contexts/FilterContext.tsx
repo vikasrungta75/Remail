@@ -13,10 +13,12 @@ export interface Filters {
 	category: string[];
 	tier: string[];
 	type: string[];
+	/** subgroup keys within the type */
+	sub: string[];
 	view: 'all' | 'me';
 }
 
-const DEFAULT: Filters = { range: '30d', customer: [], mailbox: [], sentiment: [], rag: [], status: [], category: [], tier: [], type: [], view: 'all' };
+const DEFAULT: Filters = { range: '30d', customer: [], mailbox: [], sentiment: [], rag: [], status: [], category: [], tier: [], type: [], sub: [], view: 'all' };
 
 function load(): Filters {
 	try {
@@ -58,12 +60,12 @@ export function FilterProvider({ children }: { children: ReactNode }) {
 		return {
 			from, to,
 			customer: filters.customer, mailbox: filters.mailbox, sentiment: filters.sentiment, rag: filters.rag,
-			status: filters.status, category: filters.category, tier: filters.tier, type: filters.type,
+			status: filters.status, category: filters.category, tier: filters.tier, type: filters.type, sub: filters.sub,
 			view: filters.view === 'me' ? 'me' : undefined,
 		};
 	}, [filters]);
-	const activeCount = ['customer', 'mailbox', 'sentiment', 'rag', 'status', 'category', 'tier', 'type'].reduce(
-		(n, k) => n + ((filters as any)[k].length ? 1 : 0), 0,
+	const activeCount = ['customer', 'mailbox', 'sentiment', 'rag', 'status', 'category', 'tier', 'type', 'sub'].reduce(
+		(n, k) => n + ((filters as any)[k]?.length ? 1 : 0), 0,
 	);
 	return <FilterContext.Provider value={{ filters, set, reset, params, activeCount }}>{children}</FilterContext.Provider>;
 }

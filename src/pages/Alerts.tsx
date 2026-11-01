@@ -6,6 +6,9 @@ import { api } from '../api/client';
 import { useAuth } from '../contexts/AuthContext';
 import { useToast } from '../contexts/ToastContext';
 import { Card, Empty, Loader, Modal, PageHead, Segmented, StatusBadge, Switch } from '../components/ui';
+import { Drop, FilterStrip, countLabel } from '../components/FilterStrip';
+import { useFilterOptions } from '../components/FilterBar';
+import { BUSINESS_LABELS } from '../lib/format';
 import { COLORS, ago } from '../lib/format';
 
 const RULE_TYPES: Record<string, { label: string; help: string }> = {
@@ -27,6 +30,21 @@ export default function Alerts() {
 	const [tab, setTab] = useState<'feed' | 'rules'>('feed');
 	const [status, setStatus] = useState<'open' | 'acknowledged' | 'resolved' | 'all'>('open');
 	const feed = useQuery({ queryKey: ['alerts', status], queryFn: () => api(`/alerts?status=${status}`), refetchInterval: 30_000 });
+	const opts = useFilterOptions();
+	const [af, setAf] = useState({ q: '', severity: '', days: '', kind: '', group: '', mailbox: '', escalated: '' });
+	const all: any[] = feed.data?.rows || [];
+	const within = (d: string) => !af.days || Date.now() - new Date(d).getTime() < Number(af.days) * 86400_000;
+	const match = (a: any, skip?: string) =>
+		(skip === 'severity' || !af.severity || a.severity === af.severity) &&
+		(skip === 'days' || within(a.created_at)) &&
+		(skip === 'kind' || !af.kind || a.rule_type === af.kind) &&
+		(skip === 'group' || !af.group || a.business_category === af.group) &&
+		(skip === 'mailbox' || !af.mailbox || (a.mailbox_ids || []).map(String).includes(af.mailbox)) &&
+		(skip === 'escalated' || !af.escalated || (af.escalated === 'yes' ? a.escalation_level > 0 : !a.escalation_level)) &&
+		(!af.q || `${a.title} ${a.body} ${a.customer_name || ''} ${a.subject || ''}`.toLowerCase().includes(af.q.toLowerCase()));
+	const shown = all.filter((a) => match(a));
+	const count = (skip: string, test: (a: any) => boolean) => all.filter((a) => match(a, skip) && test(a)).length;
+	const activeAf = Object.values(af).filter(Boolean).length;
 	const rules = useQuery({ queryKey: ['alert-rules'], queryFn: () => api('/alert-rules'), enabled: tab === 'rules' });
 	const act = useMutation({
 		mutationFn: (a: { id: number; action: string }) => api(`/alerts/${a.id}/${a.action}`, { body: {} }),
@@ -66,11 +84,20 @@ export default function Alerts() {
 
 			{tab === 'feed' && (
 				<>
-					<div className="row mb-16">
+					<div className="row-between mb-8">
 						<Segmented value={status} onChange={setStatus} options={[{ v: 'open', l: 'Open' }, { v: 'acknowledged', l: 'Acknowledged' }, { v: 'resolved', l: 'Resolved' }, { v: 'all', l: 'All' }]} />
+						<span className="small faint">{shown.length.toLocaleString('en-CA')} of {all.length.toLocaleString('en-CA')} shown</span>
 					</div>
+					<FilterStrip search={af.q} onSearch={(q) => setAf({ ...af, q })} placeholder="Search name, subject or alert text" active={activeAf} onClear={() => setAf({ q: '', severity: '', days: '', kind: '', group: '', mailbox: '', escalated: '' })}>
+						<Drop label="Severity" value={af.severity} onChange={(v) => setAf({ ...af, severity: v })} options={[['', 'Any severity'], ...['critical', 'high', 'medium', 'low'].map((x) => [x, `${x[0].toUpperCase()}${x.slice(1)}${countLabel(count('severity', (a) => a.severity === x))}`] as [string, string])]} />
+						<Drop label="Raised" value={af.days} onChange={(v) => setAf({ ...af, days: v })} options={[['', 'Any time'], ['1', `Last day${countLabel(count('days', (a) => Date.now() - new Date(a.created_at).getTime() < 86400_000))}`], ['7', 'Last 7 days'], ['30', 'Last 30 days']]} />
+						<Drop label="Alert type" value={af.kind} onChange={(v) => setAf({ ...af, kind: v })} options={[['', 'Any type'], ...Object.entries(RULE_TYPES).map(([k, t]) => [k, `${t.label}${countLabel(count('kind', (a) => a.rule_type === k))}`] as [string, string])]} />
+						<Drop label="Group" value={af.group} onChange={(v) => setAf({ ...af, group: v })} options={[['', 'All groups'], ...Object.entries(BUSINESS_LABELS).map(([k, l]) => [k, `${l}${countLabel(count('group', (a) => a.business_category === k))}`] as [string, string])]} />
+						<Drop label="Mailbox" value={af.mailbox} onChange={(v) => setAf({ ...af, mailbox: v })} options={[['', 'All mailboxes'], ...(opts.data?.mailboxes || []).map((m: any) => [String(m.id), m.address] as [string, string])]} />
+						<Drop label="Escalation" value={af.escalated} onChange={(v) => setAf({ ...af, escalated: v })} options={[['', 'Escalated or not'], ['yes', 'Escalated'], ['no', 'Not escalated']]} />
+					</FilterStrip>
 					<Card flush>
-						{feed.isLoading ? <Loader /> : !feed.data?.rows?.length ? <Empty text="No alerts" icon={<MdNotificationsActive />} /> : feed.data.rows.map((a: any) => (
+						{feed.isLoading ? <Loader /> : !shown.length ? <Empty text={all.length ? 'No alerts match these filters' : 'No alerts'} icon={<MdNotificationsActive />} /> : shown.map((a: any) => (
 							<div key={a.id} className="list-item" style={{ cursor: 'default' }}>
 								<span className="badge" style={{ background: a.severity === 'critical' ? COLORS.pink : a.severity === 'high' ? COLORS.amber : COLORS.blue, color: '#fff', alignSelf: 'flex-start' }}>
 									{a.severity[0].toUpperCase() + a.severity.slice(1)}
@@ -86,7 +113,7 @@ export default function Alerts() {
 										{a.rule_name && <span className="chip">{a.rule_name}</span>}
 										{a.escalation_level > 0 && <span className="badge red">Escalated L{a.escalation_level}</span>}
 										{a.acknowledged_by_name && <span className="xs faint">Acknowledged by {a.acknowledged_by_name} {ago(a.acknowledged_at)}</span>}
-										{Object.entries(a.delivered || {}).map(([k, v]) => <span key={k} className="xs faint">{k.replace('_l', ' L')}: {String(v)}</span>)}
+										{Object.entries(a.delivered || {}).filter(([, v]) => !/skipped/i.test(String(v))).map(([k, v]) => <span key={k} className="xs faint">{k.replace('_l', ' L')}: {String(v)}</span>)}
 									</div>
 								</div>
 								{can('analyst') && (
@@ -175,10 +202,10 @@ export default function Alerts() {
 							<label key={k} className="row small"><input type="checkbox" checked={edit.channels.includes(k)} onChange={(e) => setEdit({ ...edit, channels: e.target.checked ? [...edit.channels, k] : edit.channels.filter((x: string) => x !== k) })} /> {l}</label>
 						))}</div>
 					</div>
-					<div className="field"><label>Email recipients</label><input className="input" value={edit.recipientsText} onChange={(e) => setEdit({ ...edit, recipientsText: e.target.value })} placeholder="cs-lead@wheelking.com, ops@wheelking.com" /><span className="hint">Admins and managers who opted in also receive alerts.</span></div>
+					<div className="field"><label>Email recipients</label><input className="input" value={edit.recipientsText} onChange={(e) => setEdit({ ...edit, recipientsText: e.target.value })} placeholder="cs-lead@wheelking.org, orders@wheelking.org" /><span className="hint">Admins and managers who opted in also receive alerts.</span></div>
 					<div className="grid g-2">
 						<div className="field"><label>Escalate if not acknowledged within (minutes)</label><input className="input" type="number" value={edit.escalate_after_minutes} onChange={(e) => setEdit({ ...edit, escalate_after_minutes: e.target.value })} placeholder="Leave empty to disable" /></div>
-						<div className="field"><label>Escalation recipients</label><input className="input" value={edit.escText} onChange={(e) => setEdit({ ...edit, escText: e.target.value })} placeholder="head-of-cs@wheelking.com" /></div>
+						<div className="field"><label>Escalation recipients</label><input className="input" value={edit.escText} onChange={(e) => setEdit({ ...edit, escText: e.target.value })} placeholder="manager@wheelking.org" /></div>
 					</div>
 				</Modal>
 			)}

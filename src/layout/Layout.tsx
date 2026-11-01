@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
-import { MdMenu, MdMenuOpen, MdNotificationsNone, MdSearch, MdLogout, MdPerson, MdSync } from 'react-icons/md';
+import { MdKeyboardArrowDown, MdKeyboardArrowUp, MdMenu, MdMenuOpen, MdNotificationsNone, MdSearch, MdLogout, MdPerson, MdSync } from 'react-icons/md';
 import { menu, titleFor } from '../menu';
 import { useAuth } from '../contexts/AuthContext';
 import { useFilters } from '../contexts/FilterContext';
@@ -24,6 +24,22 @@ export default function Layout() {
 	const loc = useLocation();
 	const nav = useNavigate();
 	const userMenu = useRef<HTMLDivElement>(null);
+	// the menu can be longer than the screen: show arrows when there is more above or below
+	const navRef = useRef<HTMLDivElement>(null);
+	const [more, setMore] = useState({ up: false, down: false });
+	const checkMore = () => {
+		const el = navRef.current;
+		if (!el) return;
+		const up = el.scrollTop > 4;
+		const down = el.scrollTop + el.clientHeight < el.scrollHeight - 4;
+		setMore((m) => (m.up === up && m.down === down ? m : { up, down }));
+	};
+	useEffect(() => {
+		checkMore();
+		window.addEventListener('resize', checkMore);
+		return () => window.removeEventListener('resize', checkMore);
+	});
+	const scrollNav = (dir: number) => navRef.current?.scrollBy({ top: dir * 220, behavior: 'smooth' });
 
 	useEffect(() => setMobileOpen(false), [loc.pathname]);
 	useEffect(() => {
@@ -35,10 +51,14 @@ export default function Layout() {
 	const { filters, set: setFilters } = useFilters();
 	const myday = useQuery({ queryKey: ['my-day'], queryFn: () => api('/views/my-day'), refetchInterval: 120_000 });
 	const alerts = useQuery({ queryKey: ['alert-counts'], queryFn: () => api('/alerts?status=open'), refetchInterval: 60_000 });
+	const sys = useQuery({ queryKey: ['system-status'], queryFn: () => api('/system/status'), refetchInterval: 120_000, enabled: can('manager') });
+	const aiPaused = sys.data?.progress?.ai_paused_until && new Date(sys.data.progress.ai_paused_until) > new Date();
 	const summary = useQuery({ queryKey: ['nav-summary'], queryFn: () => api('/dashboard/summary'), refetchInterval: 120_000 });
+	const drafts = useQuery({ queryKey: ['nav-drafts', filters.view], queryFn: () => api(`/drafts?status=draft${filters.view === 'me' ? '&view=me' : ''}`), refetchInterval: 120_000 });
 	const badge = (b?: string) => {
 		if (b === 'alerts') return alerts.data?.counts?.open || 0;
 		if (b === 'critical') return summary.data?.critical?.filter((c: any) => c.rag === 'red').length || 0;
+		if (b === 'drafts') return drafts.data?.counts?.draft || 0;
 		if (b === 'myday') return (myday.data?.stats?.awaiting || 0) + (myday.data?.stats?.actionsOverdue || 0);
 		return 0;
 	};
@@ -59,7 +79,8 @@ export default function Layout() {
 						{min ? <MdMenu /> : <MdMenuOpen />}
 					</button>
 				</div>
-				<div className="aside-body">
+				{more.up && <button className="aside-scroll up" onClick={() => scrollNav(-1)} aria-label="Scroll menu up"><MdKeyboardArrowUp /></button>}
+				<div className="aside-body" ref={navRef} onScroll={checkMore}>
 					{menu.map((s) => {
 						const items = s.items.filter((i) => !i.minRole || can(i.minRole));
 						if (!items.length) return null;
@@ -80,6 +101,7 @@ export default function Layout() {
 						);
 					})}
 				</div>
+				{more.down && <button className="aside-scroll down" onClick={() => scrollNav(1)} aria-label="Scroll menu down"><MdKeyboardArrowDown /></button>}
 				<div className="aside-foot">
 					<img src="/ravity-logo.svg" alt="Ravity" />
 					<span>{orgName}</span>
@@ -96,7 +118,7 @@ export default function Layout() {
 						</div>
 					)}
 					{summary.data?.sync?.last_synced_at && (
-						<span className="badge outline small" title="Last mailbox sync"><MdSync /> Synced {ago(summary.data.sync.last_synced_at)}</span>
+						<span className="badge outline small cursor" title="Last mailbox sync. Select to see what has been processed" onClick={() => nav('/admin/processing')}><MdSync /> Synced {ago(summary.data.sync.last_synced_at)}</span>
 					)}
 					<form
 						className="header-search"
@@ -126,6 +148,11 @@ export default function Layout() {
 					</div>
 				</header>
 				<main className="content">
+					{aiPaused && (
+						<div className="ai-banner" role="alert">
+							<b>Claude analysis is paused</b> until {new Date(sys.data.progress.ai_paused_until).toLocaleTimeString()}: {sys.data.progress.ai_last_error}. New mail is sorted by the rules engine meanwhile. <a href="/admin/processing">Processing status</a>
+						</div>
+					)}
 					<Outlet />
 				</main>
 			</div>

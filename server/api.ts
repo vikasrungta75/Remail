@@ -3,18 +3,19 @@ import { HttpError, Router, intParam, json, redirect, type Ctx } from './http';
 import {
 	authenticate, authMode, consumeResetToken, createResetToken, defaultOrgId, hashPassword, login, logout,
 	mailboxScope, publicUser, requireRole, verifyPassword, ROLE_RANK, type Role,
-	ravityConfigured, ravityForgotPassword, ravityResetPassword, microsoftSsoEnabled, loginWithMicrosoft,
+	ravityConfigured, ravityForgotPassword, ravityResetPassword, microsoftSsoEnabled, loginWithMicrosoft, loginWithGoogle,
 } from './auth';
-import { categoriesOverview, myDay, proposals, team } from './views';
+import { categoriesOverview, categoryReport, myDay, proposals, team } from './views';
 import { audit } from './audit';
 import { convFilter, dashboardSummary, dashboardTrends, filterOptions, insights } from './queries';
 import { getOrg, invalidateOrg } from './settings';
-import { randomToken, safeEqual } from './crypto';
+import { encrypt, randomToken, safeEqual } from './crypto';
 import {
 	microsoftAuthorizeUrl, microsoftConfigured, microsoftExchangeCode, microsoftAdminConsentUrl, microsoftSignIn,
 	microsoftTestMailbox, orgTenant, msSigninScopes,
+	microsoftSendEnabled,
 } from './connectors/microsoft';
-import { googleAuthorizeUrl, googleConfigured, googleExchangeCode } from './connectors/gmail';
+import { googleAuthorizeUrl, googleConfigured, googleExchangeCode, googleSsoEnabled, googleSigninConnectsMailbox, googleSigninScopes, googleSignIn, googleTestMailbox, serviceAccount, workspaceConfigured, GMAIL_READONLY, GMAIL_SEND, gmailSendEnabled, loadServiceAccount, parseServiceAccount } from './connectors/gmail';
 import { parseEml } from './connectors/upload';
 import { ingestMessages } from './ingest';
 import { analyseConversation, analysePending, backfillHealthHistory, updateCustomerHealth } from './analyze';
@@ -24,7 +25,14 @@ import { appUrl, emailLayout, esc, mailerProvider, sendEmail } from './mailer';
 import { buildReport, runSchedule } from './reports';
 import { ask, SUGGESTED_QUESTIONS } from './copilot';
 import { loadDemoData, clearDemoData, demoEnabled } from './demo';
-import { BUSINESS_CATEGORIES, BUSINESS_LABELS, CATEGORIES, CATEGORY_LABELS, PROPOSAL_STAGES } from './ai/types';
+import { enrichCustomer } from './enrich';
+import { branches as branchList, headOffice, footerForConversation } from './branding';
+import { buildProfile, listCustomerDb, merged as mergedProfile, updateProfile } from './profiles';
+import { listTemplates, resetTemplate, updateTemplate } from './templates';
+import { deleteReference, importCsv, listReference, matchReference, TEMPLATES_CSV, type RefKind } from './reference';
+import { normaliseSubcategory, subgroupOf, taxonomyTree } from './ai/taxonomy';
+import { dismissDraft, fillDraft, getDraft, getDraftForConversation, listDrafts, saveDraft, sendDraft } from './drafts';
+import { BUSINESS_CATEGORIES, BUSINESS_LABELS, CATEGORIES, CATEGORY_LABELS, PROPOSAL_STAGES, type BusinessCategory } from './ai/types';
 import type { MailboxRow } from './connectors/types';
 
 const r = new Router();
@@ -35,8 +43,52 @@ r.get('/api/auth/config', async () => ({
 	ravity: ravityConfigured(),
 	microsoft: microsoftSsoEnabled(),
 	microsoftConnectsMailbox: microsoftSsoEnabled() && process.env.MS_SIGNIN_CONNECTS_MAILBOX !== 'false',
+	google: googleSsoEnabled(),
+	googleConnectsMailbox: googleSsoEnabled() && googleSigninConnectsMailbox(),
 	orgName: (await getOrg(await defaultOrgId())).name,
 }), { auth: 'public' });
+
+// Sign in with Google (Google Workspace account). Also connects the person's own inbox, read-only.
+r.post('/api/auth/google/start', async (ctx) => {
+	if (!googleSsoEnabled()) throw new HttpError(400, 'Google sign-in is not configured');
+	const state = randomToken(24);
+	await q('insert into oauth_states (state, provider) values ($1, $2)', [state, 'google_signin']);
+	return { url: googleAuthorizeUrl(state, `${appUrl()}/api/auth/google/callback`, { scope: googleSigninScopes(), prompt: 'select_account' }) };
+}, { auth: 'public' });
+
+r.get('/api/auth/google/callback', async (ctx) => {
+	const fail = (m: string) => redirect(`${appUrl()}/auth/login?error=${encodeURIComponent(m)}`);
+	const st = await one<any>(`delete from oauth_states where state=$1 and provider='google_signin' and created_at > now() - interval '15 minutes' returning *`, [ctx.query.get('state') || '']);
+	if (!st) return fail('The sign-in request expired. Please try again.');
+	if (ctx.query.get('error')) return fail(ctx.query.get('error') === 'access_denied' ? 'Sign-in was cancelled.' : ctx.query.get('error')!);
+	const redirectUri = `${appUrl()}/api/auth/google/callback`;
+	try {
+		const g = await googleSignIn(ctx.query.get('code') || '', redirectUri);
+		const res = await loginWithGoogle(ctx, g);
+		const user = await one<any>('select * from users where lower(email)=$1 or google_sub=$2 limit 1', [g.email, g.sub]);
+		if (user && googleSigninConnectsMailbox()) {
+			if (g.credentials) {
+				try {
+					await connectPersonalMailbox(ctx, user, 'gmail', { address: g.email, displayName: g.fullName, credentials: g.credentials }, Number(process.env.SIGNIN_BACKFILL_DAYS || (await getOrg(user.org_id)).settings.defaultBackfillDays || 90), false);
+				} catch (e: any) {
+					console.error('[sso] mailbox connect', e.message);
+				}
+			} else {
+				// Google only returns a refresh token on first consent: ask once more if this inbox is not yet connected
+				const mb = await one<any>(`select id from mailboxes where org_id=$1 and provider='gmail' and lower(address)=$2 and credentials_enc is not null`, [user.org_id, g.email]);
+				if (!mb && !st.payload?.consentRetry) {
+					const s2 = randomToken(24);
+					await q('insert into oauth_states (state, provider, payload) values ($1,$2,$3)', [s2, 'google_signin', JSON.stringify({ consentRetry: true })]);
+					return redirect(googleAuthorizeUrl(s2, redirectUri, { scope: googleSigninScopes(), prompt: 'consent', loginHint: g.email }));
+				}
+			}
+		}
+		return redirect(`${appUrl()}/auth/sso#token=${encodeURIComponent(res.token)}&loginTime=${encodeURIComponent(res.loginTime)}`);
+	} catch (e: any) {
+		console.error('[sso google]', e.message);
+		return fail(e instanceof HttpError ? e.message : 'Google sign-in failed. Please try again.');
+	}
+}, { auth: 'public' });
 
 // Sign in with Microsoft (Office 365 work account)
 r.post('/api/auth/microsoft/start', async () => {
@@ -58,7 +110,7 @@ r.get('/api/auth/microsoft/callback', async (ctx) => {
 			// signing in also connects (or refreshes) the person's own inbox, read-only
 			try {
 				const user = await one<any>('select * from users where lower(email)=$1 or ms_object_id=$2 limit 1', [ms.email, ms.objectId]);
-				if (user) await connectPersonalMailbox(ctx, user, 'microsoft', { address: ms.email, displayName: ms.fullName, credentials: ms.credentials }, Number(process.env.SIGNIN_BACKFILL_DAYS || 30), false);
+				if (user) await connectPersonalMailbox(ctx, user, 'microsoft', { address: ms.email, displayName: ms.fullName, credentials: ms.credentials }, Number(process.env.SIGNIN_BACKFILL_DAYS || 90), false);
 			} catch (e: any) {
 				console.error('[sso] mailbox connect', e.message);
 			}
@@ -201,7 +253,7 @@ r.get('/api/conversations', async (ctx) => {
 			`select c.id, c.subject, c.summary, c.sentiment, c.sentiment_score, c.rag, c.rag_reason, c.customer_state, c.urgency,
 			        c.escalation_risk, c.priority_score, c.categories, c.status, c.awaiting_reply, c.message_count, c.duplicate_count,
 			        c.last_message_at, c.last_inbound_at, c.first_response_minutes, c.mailbox_ids, c.assignee_id, c.analysed_at,
-			        c.business_category, c.proposal_stage, c.is_internal, c.is_automated,
+			        c.business_category, c.subcategory, c.proposal_stage, c.is_internal, c.is_automated,
 			        cu.id as customer_id, cu.name as customer_name, cu.tier as customer_tier, u.full_name as assignee_name,
 			        (select count(*) from action_items a where a.conversation_id=c.id and a.status='open')::int as open_actions
 			   from conversations c left join customers cu on cu.id=c.customer_id left join users u on u.id=c.assignee_id
@@ -217,7 +269,7 @@ r.get('/api/conversations/export', async (ctx) => {
 	requireRole(ctx.user, 'analyst');
 	const f = await convFilter(ctx.user!, ctx.query);
 	const rows = await q<any>(
-		`select c.id, c.business_category as type, cu.name as customer, cu.tier, c.subject, c.rag, c.sentiment, c.urgency, c.escalation_risk, c.status,
+		`select c.id, c.business_category as type, c.subcategory as subtype, cu.name as customer, cu.tier, c.subject, c.rag, c.sentiment, c.urgency, c.escalation_risk, c.status,
 		        array_to_string(c.categories, '; ') as categories, c.message_count, c.awaiting_reply, c.first_response_minutes,
 		        c.last_message_at, c.summary
 		   from conversations c left join customers cu on cu.id=c.customer_id where ${f.where.join(' and ')}
@@ -274,11 +326,20 @@ r.patch('/api/conversations/:id', async (ctx) => {
 	requireRole(ctx.user, 'analyst');
 	const id = Number(ctx.params.id);
 	await assertConversationAccess(ctx, id);
-	const { status, assigneeId, businessCategory, proposalStage } = ctx.body || {};
+	const { status, assigneeId, businessCategory, subcategory, proposalStage } = ctx.body || {};
 	if (status && !['open', 'in_progress', 'resolved', 'ignored'].includes(status)) throw new HttpError(400, 'Invalid status');
 	if (businessCategory) {
 		if (!(BUSINESS_CATEGORIES as readonly string[]).includes(businessCategory)) throw new HttpError(400, 'Invalid category');
 		await q('update conversations set business_category=$2, category_locked=true where id=$1', [id, businessCategory]);
+	}
+	if (subcategory) {
+		const cur = await one<any>('select business_category from conversations where id=$1', [id]);
+		const group = (businessCategory || cur?.business_category || 'other') as BusinessCategory;
+		if (!subgroupOf(group, subcategory)) throw new HttpError(400, 'That subgroup does not belong to the group');
+		await q('update conversations set subcategory=$2, subcategory_locked=true where id=$1', [id, subcategory]);
+	} else if (businessCategory) {
+		const cur = await one<any>('select subcategory from conversations where id=$1', [id]);
+		if (!subgroupOf(businessCategory, cur?.subcategory)) await q('update conversations set subcategory=$2 where id=$1', [id, normaliseSubcategory(businessCategory, '')]);
 	}
 	if (proposalStage) {
 		if (!(PROPOSAL_STAGES as readonly string[]).includes(proposalStage)) throw new HttpError(400, 'Invalid stage');
@@ -310,6 +371,102 @@ r.post('/api/conversations/:id/notes', async (ctx) => {
 	return n;
 });
 
+// ── Reply drafts: stay in the app until a person presses Send ─────────────
+r.get('/api/drafts', async (ctx) => {
+	const qs = new URLSearchParams(ctx.query);
+	if (!qs.get('audience')) qs.set('audience', 'all');
+	const status = ['draft', 'sent', 'dismissed', 'replied_elsewhere'].includes(ctx.query.get('status') || '') ? ctx.query.get('status')! : 'draft';
+	const add = (w: { where: string[]; params: unknown[] }, sql: (n: string) => string, v: unknown) => { w.params.push(v); w.where.push(sql(`$${w.params.length}`)); };
+	// counts beside the quick filters (rating, received, status) ignore those filters, so they show what each choice would give
+	const noQuick = new URLSearchParams(qs);
+	noQuick.delete('rag');
+	const fq = await convFilter(ctx.user!, noQuick, { ignoreDates: true });
+	const base = { where: [...fq.where], params: [...fq.params] };
+	const f = await convFilter(ctx.user!, qs, { ignoreDates: true });
+	const waited = Number(ctx.query.get('waitingDays'));
+	if (waited > 0) add(f, (n) => `c.last_inbound_at > now() - make_interval(days => ${n}::int)`, waited);
+	const urg = (ctx.query.get('urgency') || '').split(',').filter((u) => ['low', 'medium', 'high', 'critical'].includes(u));
+	if (urg.length) add(f, (n) => `c.urgency = any(${n})`, urg);
+	const ready = ctx.query.get('ready');
+	if (ready === 'yes') f.where.push(`d.body !~* '\\[\\[\\s*provide\\s*:'`);
+	if (ready === 'no') f.where.push(`d.body ~* '\\[\\[\\s*provide\\s*:'`);
+	const text = (ctx.query.get('q') || '').trim();
+	const search = (n: string) => `(c.subject ilike ${n} or d.body ilike ${n} or exists (select 1 from customers k where k.id=c.customer_id and k.name ilike ${n}) or exists (select 1 from unnest(d.to_addresses) a where a ilike ${n}))`;
+	if (text) { add(f, search, `%${text}%`); add(fq, search, `%${text}%`); }
+	const sort = ctx.query.get('sort') || 'priority';
+	const rows = await listDrafts(f.where.join(' and '), f.params, status, sort);
+	const total = await one<any>(`select count(*)::int n from reply_drafts d join conversations c on c.id=d.conversation_id where ${f.where.join(' and ')} and d.status=$${f.params.length + 1}`, [...f.params, status]);
+	const counts = await one<any>(
+		`select count(*) filter (where d.status='draft')::int as draft, count(*) filter (where d.status='sent' and d.sent_at > now() - interval '7 days')::int as sent_week,
+		        count(*) filter (where d.status='sent')::int as sent
+		   from reply_drafts d join conversations c on c.id=d.conversation_id where ${base.where.join(' and ')}`,
+		base.params,
+	);
+	const facets = await one<any>(
+		`select count(*)::int as total,
+		        count(*) filter (where d.body !~* '\\[\\[\\s*provide\\s*:')::int as ready,
+		        count(*) filter (where c.rag='red')::int as red, count(*) filter (where c.rag='amber')::int as amber, count(*) filter (where c.rag='green')::int as green,
+		        count(*) filter (where c.last_inbound_at > now() - interval '1 day')::int as today,
+		        count(*) filter (where c.last_inbound_at > now() - interval '7 days')::int as week,
+		        count(*) filter (where c.last_inbound_at <= now() - interval '30 days')::int as older
+		   from reply_drafts d join conversations c on c.id=d.conversation_id
+		  where ${fq.where.join(' and ')} and d.status='draft'`,
+		fq.params,
+	);
+	const byGroup = await q<any>(
+		`select c.business_category as k, count(*)::int as n from reply_drafts d join conversations c on c.id=d.conversation_id
+		  where ${fq.where.join(' and ')} and d.status='draft' group by 1 order by 2 desc`,
+		fq.params,
+	);
+	return { rows, total: total?.n || 0, counts, facets: { ...facets, groups: byGroup } };
+});
+r.get('/api/conversations/:id/draft', async (ctx) => {
+	const id = Number(ctx.params.id);
+	await assertConversationAccess(ctx, id);
+	return { draft: await getDraftForConversation(id, ctx.user!.orgId) };
+});
+async function draftAccess(ctx: Ctx) {
+	const d = await getDraft(Number(ctx.params.id), ctx.user!.orgId);
+	if (!d) throw new HttpError(404, 'Draft not found');
+	await assertConversationAccess(ctx, d.conversation_id);
+	return d;
+}
+r.put('/api/drafts/:id', async (ctx) => {
+	requireRole(ctx.user, 'analyst');
+	await draftAccess(ctx);
+	return saveDraft(ctx.user!, Number(ctx.params.id), ctx.body || {});
+});
+r.post('/api/drafts/:id/send', async (ctx) => {
+	requireRole(ctx.user, 'analyst');
+	const d = await draftAccess(ctx);
+	const res = await sendDraft(ctx, ctx.user!, d.id, ctx.body || {});
+	kickWorker(res.mailboxId).catch(() => {}); // pull the sent message into the thread
+	return res;
+});
+r.post('/api/drafts/:id/fill', async (ctx) => {
+	requireRole(ctx.user, 'analyst');
+	const d = await draftAccess(ctx);
+	const res = await fillDraft(ctx.user!, d.id, ctx.body?.answers || [], ctx.body?.rewrite !== false);
+	await audit(ctx, 'reply.filled', 'reply_draft', d.id, { filled: res.filled, remaining: res.remaining, how: res.how });
+	return res;
+});
+r.get('/api/drafts/:id/footer', async (ctx) => {
+	const d = await draftAccess(ctx);
+	return { footer: await footerForConversation(ctx.user!.orgId, d.conversation_id) };
+});
+r.post('/api/drafts/:id/dismiss', async (ctx) => {
+	requireRole(ctx.user, 'analyst');
+	const d = await draftAccess(ctx);
+	return dismissDraft(ctx, ctx.user!, d.id);
+});
+r.post('/api/drafts/:id/regenerate', async (ctx) => {
+	requireRole(ctx.user, 'analyst');
+	const d = await draftAccess(ctx);
+	await q(`update reply_drafts set edited=false, status='draft', reply_to_email_id=null where id=$1`, [d.id]);
+	await analyseConversation(d.conversation_id);
+	return getDraft(d.id, ctx.user!.orgId);
+});
+
 r.post('/api/conversations/:id/reanalyse', async (ctx) => {
 	requireRole(ctx.user, 'analyst');
 	const id = Number(ctx.params.id);
@@ -322,6 +479,61 @@ r.post('/api/conversations/:id/reanalyse', async (ctx) => {
 
 // ── Comprehensive and individual views ──────────────────────────────────────
 r.get('/api/views/categories', (ctx) => categoriesOverview(ctx.user!, ctx.query));
+r.get('/api/views/category-report', (ctx) => categoryReport(ctx.user!, ctx.query));
+r.get('/api/views/category-report.csv', async (ctx) => {
+	const rep = await categoryReport(ctx.user!, ctx.query);
+	const cols = ['group', 'subgroup', 'conversations', 'emails', 'awaiting', 'overdue_replies', 'negative', 'red', 'drafts_waiting', 'avg_first_response_hours'];
+	const cell = (v: any) => { const s = v === null || v === undefined ? '' : String(v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+	const lines = [cols.join(',')];
+	for (const g of rep.groups) for (const sg of g.subgroups) lines.push([g.label, sg.label, sg.conversations, sg.emails, sg.awaiting, sg.overdue_replies, sg.negative, sg.red, sg.drafts_waiting, sg.avg_first_response_hours].map(cell).join(','));
+	await audit(ctx, 'export.category_report', 'conversation', null, { from: rep.from, to: rep.to });
+	return new Response(lines.join('\n'), {
+		headers: { 'content-type': 'text/csv; charset=utf-8', 'content-disposition': `attachment; filename="remail-category-report-${new Date().toISOString().slice(0, 10)}.csv"` },
+	});
+});
+
+// ── Help: email categories, reply templates and reference data ──────────────
+r.get('/api/taxonomy', async () => ({
+	groups: taxonomyTree().map((g) => ({ ...g, label: BUSINESS_LABELS[g.key] })),
+}));
+r.get('/api/templates', async (ctx) => ({ templates: await listTemplates(ctx.user!.orgId), fields: ['{{name}}', '{{order_ref}}', '{{book}}', '{{signature}}'] }));
+r.put('/api/templates/:id', async (ctx) => {
+	requireRole(ctx.user, 'manager');
+	const t = await updateTemplate(ctx.user!.orgId, ctx.user!.id, Number(ctx.params.id), ctx.body || {});
+	await audit(ctx, 'template.updated', 'reply_template', Number(ctx.params.id));
+	return t;
+});
+r.post('/api/templates/:id/reset', async (ctx) => {
+	requireRole(ctx.user, 'manager');
+	const t = await resetTemplate(ctx.user!.orgId, Number(ctx.params.id));
+	await audit(ctx, 'template.reset', 'reply_template', Number(ctx.params.id));
+	return t;
+});
+r.get('/api/reference', async (ctx) => listReference(ctx.user!.orgId, ctx.query.get('kind') || undefined, ctx.query.get('q') || undefined));
+r.get('/api/reference/sample/:kind', async (ctx) => {
+	const kind = ctx.params.kind as RefKind;
+	if (!TEMPLATES_CSV[kind]) throw new HttpError(404, 'Unknown kind');
+	return new Response(TEMPLATES_CSV[kind], { headers: { 'content-type': 'text/csv; charset=utf-8', 'content-disposition': `attachment; filename="remail-${kind}-sample.csv"` } });
+});
+r.post('/api/reference/import', async (ctx) => {
+	requireRole(ctx.user, 'manager');
+	const { kind, csv, replace } = ctx.body || {};
+	const res = await importCsv(ctx.user!.orgId, kind, String(csv || ''), !!replace);
+	await audit(ctx, 'reference.imported', 'reference_items', null, { kind, ...res, replace: !!replace });
+	return res;
+});
+r.post('/api/reference/test', async (ctx) => ({ matches: await matchReference(ctx.user!.orgId, String(ctx.body?.text || '').slice(0, 5000)) }));
+r.del('/api/reference/:id', async (ctx) => {
+	requireRole(ctx.user, 'manager');
+	return deleteReference(ctx.user!.orgId, Number(ctx.params.id));
+});
+r.del('/api/reference', async (ctx) => {
+	requireRole(ctx.user, 'manager');
+	const kind = ctx.query.get('kind') || '';
+	if (!['book', 'faq', 'policy'].includes(kind)) throw new HttpError(400, 'Say which kind to clear');
+	await audit(ctx, 'reference.cleared', 'reference_items', null, { kind });
+	return deleteReference(ctx.user!.orgId, null, kind);
+});
 r.get('/api/views/my-day', (ctx) => myDay(ctx.user!));
 r.get('/api/views/proposals', (ctx) => proposals(ctx.user!, ctx.query));
 r.get('/api/views/team', async (ctx) => {
@@ -520,10 +732,10 @@ r.get('/api/alerts', async (ctx) => {
 	if (status !== 'all') { params.push(status); where += ` and a.status=$${params.length}`; }
 	if (scope) { params.push(scope); where += ` and (a.conversation_id is null or c.mailbox_ids && $${params.length}::bigint[])`; }
 	const rows = await q<any>(
-		`select a.*, cu.name as customer_name, c.subject, c.rag, r.name as rule_name, u.full_name as acknowledged_by_name
+		`select a.*, cu.name as customer_name, c.subject, c.rag, c.business_category, c.mailbox_ids, r.name as rule_name, r.rule_type, u.full_name as acknowledged_by_name
 		   from alerts a left join conversations c on c.id=a.conversation_id left join customers cu on cu.id=a.customer_id
 		   left join alert_rules r on r.id=a.rule_id left join users u on u.id=a.acknowledged_by
-		  where ${where} order by case a.severity when 'critical' then 0 when 'high' then 1 else 2 end, a.created_at desc limit 300`,
+		  where ${where} order by case a.severity when 'critical' then 0 when 'high' then 1 else 2 end, a.created_at desc limit 1000`,
 		params,
 	);
 	const counts = await one<any>(
@@ -690,6 +902,10 @@ async function providerStatus(orgId: number) {
 		msConsentedAt: (org.settings as any).msConsentedAt || null,
 		msConsentedBy: (org.settings as any).msConsentedBy || null,
 		google: googleConfigured(),
+		googleWorkspace: workspaceConfigured(),
+		googleServiceAccount: serviceAccount()?.client_email || null,
+		googleServiceClientId: serviceAccount()?.client_id || null,
+		googleScope: gmailSendEnabled() ? `${GMAIL_READONLY},${GMAIL_SEND}` : GMAIL_READONLY,
 	};
 }
 
@@ -697,20 +913,24 @@ r.post('/api/mailboxes/test', async (ctx) => {
 	requireRole(ctx.user, 'admin');
 	const address = String(ctx.body?.address || '').trim().toLowerCase();
 	if (!/@/.test(address)) throw new HttpError(400, 'Enter a mailbox address');
+	if (workspaceConfigured() && ctx.body?.provider !== 'microsoft') return googleTestMailbox(address);
 	return microsoftTestMailbox(ctx.user!.orgId, address);
 });
 
 r.post('/api/mailboxes', async (ctx) => {
 	requireRole(ctx.user, 'admin');
 	const { address, displayName, backfillDays } = ctx.body || {};
-	if (!microsoftConfigured() || !(await orgTenant(ctx.user!.orgId))) throw new HttpError(400, 'Connect your Microsoft 365 organisation first (administrator consent)');
+	const provider = workspaceConfigured() && ctx.body?.provider !== 'microsoft' ? 'gmail_app' : 'microsoft_app';
+	if (provider === 'microsoft_app' && (!microsoftConfigured() || !(await orgTenant(ctx.user!.orgId))))
+		throw new HttpError(400, 'Set up Google Workspace access first (GOOGLE_SERVICE_ACCOUNT_JSON and domain-wide delegation)');
 	if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(String(address || ''))) throw new HttpError(400, 'Enter a valid mailbox address');
 	const row = await one<any>(
-		`insert into mailboxes (org_id, provider, address, display_name, backfill_days, created_by) values ($1,'microsoft_app',$2,$3,$4,$5)
+		`insert into mailboxes (org_id, provider, address, display_name, backfill_days, created_by) values ($1,$6,$2,$3,$4,$5)
 		 on conflict (org_id, provider, lower(address)) do update set status='active' returning *`,
-		[ctx.user!.orgId, String(address).toLowerCase(), displayName || address, Number(backfillDays) || 30, ctx.user!.id],
+		[ctx.user!.orgId, String(address).toLowerCase(), displayName || address, Number(backfillDays) || 90, ctx.user!.id, provider],
 	);
-	await audit(ctx, 'mailbox.added', 'mailbox', row.id, { address, provider: 'microsoft_app' });
+	await audit(ctx, 'mailbox.added', 'mailbox', row.id, { address, provider });
+	kickWorker(row.id).catch(() => {});
 	return row;
 });
 
@@ -774,7 +994,7 @@ r.post('/api/connect/:provider/start', async (ctx) => {
 	const state = randomToken(24);
 	const redirectUri = `${appUrl()}/api/connect/${provider}/callback`;
 	await q('insert into oauth_states (state, user_id, provider, payload) values ($1,$2,$3,$4)', [
-		state, ctx.user!.id, provider, JSON.stringify({ backfillDays: Number(ctx.body?.backfillDays) || 30 }),
+		state, ctx.user!.id, provider, JSON.stringify({ backfillDays: Number(ctx.body?.backfillDays) || 90 }),
 	]);
 	if (provider === 'microsoft') {
 		if (!microsoftConfigured()) throw new HttpError(400, 'Microsoft app registration is not configured');
@@ -820,7 +1040,7 @@ r.get('/api/connect/:provider/callback', async (ctx) => {
 		const redirectUri = `${appUrl()}/api/connect/${provider}/callback`;
 		const res = provider === 'microsoft' ? await microsoftExchangeCode(code, redirectUri) : await googleExchangeCode(code, redirectUri);
 		const prov = provider === 'microsoft' ? 'microsoft' : 'gmail';
-		await connectPersonalMailbox(ctx, user, prov, res, st.payload?.backfillDays || 30);
+		await connectPersonalMailbox(ctx, user, prov, res, st.payload?.backfillDays || 90);
 		return back(res.address, true);
 	} catch (e: any) {
 		console.error('[connect]', e.message);
@@ -923,9 +1143,29 @@ r.post('/api/users/:id/reset-link', async (ctx) => {
 });
 
 // ── Settings, system, audit ─────────────────────────────────────────────────
+// Google Workspace service account key (domain-wide delegation), stored encrypted
+r.post('/api/settings/google-service-account', async (ctx) => {
+	requireRole(ctx.user, 'admin');
+	const raw = typeof ctx.body?.json === 'string' ? ctx.body.json : JSON.stringify(ctx.body?.json || {});
+	const sa = parseServiceAccount(raw);
+	if (!sa) throw new HttpError(400, 'This is not a Google service account key file (it needs client_email and private_key)');
+	await q(`update organisations set settings = settings || jsonb_build_object('googleServiceAccountEnc', $2::text) where id=$1`, [ctx.user!.orgId, encrypt(raw)]);
+	await loadServiceAccount(true);
+	await audit(ctx, 'settings.google_service_account', 'organisation', ctx.user!.orgId, { client_email: sa.client_email, client_id: sa.client_id });
+	return { success: true, clientEmail: sa.client_email, clientId: sa.client_id };
+});
+r.del('/api/settings/google-service-account', async (ctx) => {
+	requireRole(ctx.user, 'admin');
+	await q(`update organisations set settings = settings - 'googleServiceAccountEnc' where id=$1`, [ctx.user!.orgId]);
+	await loadServiceAccount(true);
+	await audit(ctx, 'settings.google_service_account_removed', 'organisation', ctx.user!.orgId);
+	return { success: true };
+});
+
 r.get('/api/settings', async (ctx) => {
 	const org = await getOrg(ctx.user!.orgId, true);
-	return { name: org.name, internalDomains: org.internalDomains, settings: org.settings };
+	const { googleServiceAccountEnc: _secret, ...settings } = org.settings as any;
+	return { name: org.name, internalDomains: org.internalDomains, settings: { replyFooter: true, ...settings, branches: branchList(settings.branches), headOffice: headOffice(settings, org.name) } };
 });
 
 r.patch('/api/settings', async (ctx) => {
@@ -939,6 +1179,17 @@ r.patch('/api/settings', async (ctx) => {
 		if (settings.retentionDays !== undefined) next.retentionDays = Math.max(30, Math.min(3650, Number(settings.retentionDays)));
 		if (settings.analysisWindowDays !== undefined) next.analysisWindowDays = Math.max(7, Math.min(180, Number(settings.analysisWindowDays)));
 		if (settings.ignoreAutomated !== undefined) next.ignoreAutomated = !!settings.ignoreAutomated;
+		if (settings.autoDrafts !== undefined) next.autoDrafts = !!settings.autoDrafts;
+		if (settings.replyKnowledge !== undefined) next.replyKnowledge = String(settings.replyKnowledge).slice(0, 6000);
+		if (settings.replySignature !== undefined) next.replySignature = String(settings.replySignature).slice(0, 600);
+		if (settings.replyFooter !== undefined) (next as any).replyFooter = !!settings.replyFooter;
+		if (settings.headOffice && typeof settings.headOffice === 'object') {
+			const h = settings.headOffice;
+			const clip = (v: any, n: number) => String(v || '').trim().slice(0, n);
+			(next as any).headOffice = { name: clip(h.name, 120), address: clip(h.address, 300), phone: clip(h.phone, 120), email: clip(h.email, 120), website: /^https?:\/\//.test(clip(h.website, 200)) ? clip(h.website, 200) : clip(h.website, 200) ? `https://${clip(h.website, 200)}` : '', logoUrl: /^https:\/\//.test(clip(h.logoUrl, 400)) ? clip(h.logoUrl, 400) : '' };
+		}
+		if (Array.isArray(settings.branches)) (next as any).branches = settings.branches.slice(0, 60).map((b: any) => ({ city: String(b.city || '').slice(0, 60), state: String(b.state || '').slice(0, 60), address: String(b.address || '').trim().slice(0, 300), phone: String(b.phone || '').trim().slice(0, 120), email: String(b.email || '').trim().slice(0, 120) })).filter((b: any) => b.city);
+		if (settings.defaultBackfillDays !== undefined) next.defaultBackfillDays = Math.max(7, Math.min(365, Number(settings.defaultBackfillDays) || 90));
 	}
 	await q(`update organisations set name=coalesce($2,name), internal_domains=coalesce($3,internal_domains), settings=$4 where id=$1`, [
 		ctx.user!.orgId, name ?? null,
@@ -964,12 +1215,138 @@ r.get('/api/system/status', async (ctx) => {
 		connectors: await providerStatus(ctx.user!.orgId),
 		ravity: ravityConfigured(),
 		microsoftSso: microsoftSsoEnabled(),
+		gmailSend: gmailSendEnabled(),
+		outlookSend: microsoftSendEnabled(),
+		progress: await one<any>(
+			`select (select count(*)::int from conversations where org_id=$1 and needs_analysis) as waiting_for_analysis,
+			        (select count(*)::int from conversations where org_id=$1 and analysis_model like '%(fallback)%') as rules_engine_fallback,
+			        (select count(*)::int from conversations where org_id=$1 and analysed_at is not null and analysis_model not like '%(fallback)%' and analysis_model not like 'remail-heuristic%') as analysed_by_ai,
+			        (select paused_until from ai_state where id=1) as ai_paused_until,
+			        (select last_error from ai_state where id=1) as ai_last_error,
+			        (select last_error_at from ai_state where id=1) as ai_last_error_at,
+			        (select until from worker_lease where name='tick') as worker_busy_until`,
+			[ctx.user!.orgId],
+		).catch(() => null),
 		webhooks: { teams: !!process.env.TEAMS_WEBHOOK_URL, slack: !!process.env.SLACK_WEBHOOK_URL },
 		pendingAnalysis: pending?.n || 0,
 		mailboxes: mb,
 		aiUsageThisMonth: usage,
 		lastWorkerRun: lastRun?.t,
 	};
+});
+
+// what has been read, sorted and analysed, so the numbers across the app can be reconciled
+r.get('/api/system/processing', async (ctx) => {
+	requireRole(ctx.user, 'analyst');
+	const org = ctx.user!.orgId;
+	const [mailboxes, emails, threads, runs, ai, usage] = await Promise.all([
+		q<any>(
+			`select m.id, m.address, m.display_name, m.provider, m.status, m.last_error, m.last_synced_at, m.backfill_days, m.created_at,
+			        (m.sync_state ? 'historyId' and not (m.sync_state ? 'pageToken')) as backfill_done,
+			        (select count(*) from emails e where e.mailbox_id=m.id)::int as emails,
+			        (select count(*) from emails e where e.mailbox_id=m.id and e.is_duplicate)::int as duplicates,
+			        (select min(e.sent_at) from emails e where e.mailbox_id=m.id) as oldest,
+			        (select max(e.sent_at) from emails e where e.mailbox_id=m.id) as newest,
+			        (select count(*) from conversations c where c.org_id=m.org_id and m.id = any(c.mailbox_ids))::int as threads
+			   from mailboxes m where m.org_id=$1 order by m.address`,
+			[org],
+		),
+		one<any>(
+			`select count(*)::int as stored, count(*) filter (where is_duplicate)::int as duplicates,
+			        count(*) filter (where not is_duplicate and direction='inbound')::int as inbound,
+			        count(*) filter (where not is_duplicate and direction='outbound')::int as outbound,
+			        count(*) filter (where not is_duplicate and direction='internal')::int as internal,
+			        count(*) filter (where sent_at > now() - interval '30 days')::int as last_30_days
+			   from emails where org_id=$1`,
+			[org],
+		),
+		one<any>(
+			`select count(*) filter (where message_count > 0)::int as total,
+			        count(*) filter (where message_count > 0 and customer_id is not null and not is_automated)::int as external,
+			        count(*) filter (where message_count > 0 and is_internal)::int as internal,
+			        count(*) filter (where message_count > 0 and is_automated)::int as automated,
+			        count(*) filter (where message_count > 0 and needs_analysis)::int as waiting,
+			        count(*) filter (where analysed_at is not null and analysis_model not like 'remail-heuristic%')::int as by_ai,
+			        count(*) filter (where analysis_model = 'remail-heuristic-v1')::int as by_rules,
+			        count(*) filter (where analysis_model like '%(fallback)%')::int as by_fallback,
+			        count(*) filter (where awaiting_reply and status in ('open','in_progress'))::int as awaiting,
+			        count(*) filter (where rag='red' and status in ('open','in_progress'))::int as red,
+			        count(*) filter (where rag='amber' and status in ('open','in_progress'))::int as amber,
+			        count(*) filter (where last_message_at > now() - interval '30 days' and message_count > 0)::int as last_30_days,
+			        (select count(*) from reply_drafts d where d.org_id=$1 and d.status='draft')::int as drafts,
+			        (select count(*) from reply_drafts d where d.org_id=$1 and d.status='sent')::int as sent,
+			        (select count(*) from alerts a where a.org_id=$1 and a.status='open')::int as alerts_open,
+			        (select count(*) from customers k where k.org_id=$1)::int as contacts
+			   from conversations where org_id=$1`,
+			[org],
+		),
+		q<any>(
+			`select r.started_at, r.finished_at, r.fetched, r.inserted, r.duplicates, r.error, m.address
+			   from sync_runs r join mailboxes m on m.id=r.mailbox_id where m.org_id=$1 order by r.started_at desc limit 15`,
+			[org],
+		),
+		one<any>('select paused_until, last_error, last_error_at, provider from ai_state where id=1').catch(() => null),
+		one<any>(`select count(*)::int calls, coalesce(sum(input_tokens),0)::bigint input_tokens, coalesce(sum(output_tokens),0)::bigint output_tokens
+		            from ai_usage where org_id=$1 and created_at > now() - interval '24 hours' and purpose='analysis'`, [org]),
+	]);
+	return {
+		ai: { provider: aiProvider(), model: aiModel(), ...ai, last24h: usage },
+		emails, threads, mailboxes, runs,
+		worker: await one<any>(`select until from worker_lease where name='tick'`).catch(() => null),
+	};
+});
+
+// threads read from months of history that nobody answered: take them off the waiting lists in one go
+r.get('/api/system/old-unanswered', async (ctx) => {
+	requireRole(ctx.user, 'manager');
+	const days = Math.max(7, Math.min(365, Number(ctx.query.get('days')) || 45));
+	return one<any>(
+		`select count(*)::int as threads, (select count(*) from reply_drafts d join conversations c on c.id=d.conversation_id
+		   where c.org_id=$1 and c.awaiting_reply and c.last_inbound_at < now() - make_interval(days => $2) and d.status='draft')::int as drafts
+		   from conversations c where c.org_id=$1 and c.awaiting_reply and c.status in ('open','in_progress') and c.last_inbound_at < now() - make_interval(days => $2)`,
+		[ctx.user!.orgId, days],
+	);
+});
+r.post('/api/system/old-unanswered', async (ctx) => {
+	requireRole(ctx.user, 'manager');
+	const days = Math.max(7, Math.min(365, Number(ctx.body?.days) || 45));
+	const ids = (await q<any>(
+		`update conversations set awaiting_reply=false, updated_at=now() where org_id=$1 and awaiting_reply and status in ('open','in_progress')
+		   and last_inbound_at < now() - make_interval(days => $2) returning id`,
+		[ctx.user!.orgId, days],
+	)).map((r) => r.id);
+	if (ids.length) {
+		await q(`update reply_drafts set status='dismissed', updated_at=now(), updated_by=$2 where conversation_id = any($1::bigint[]) and status='draft'`, [ids, ctx.user!.id]);
+		await q(`update alerts set status='resolved' where conversation_id = any($1::bigint[]) and status in ('open','acknowledged')`, [ids]).catch(() => {});
+	}
+	await audit(ctx, 'conversations.old_unanswered_cleared', 'conversation', null, { days, threads: ids.length });
+	return { threads: ids.length };
+});
+
+// ── Customer database (Admin) ───────────────────────────────────────────────
+r.get('/api/customer-db', async (ctx) => {
+	requireRole(ctx.user, 'analyst');
+	const res = await listCustomerDb(ctx.user!.orgId, ctx.query);
+	if (ctx.query.get('format') !== 'csv') return res;
+	const cols = ['name', 'type', 'organisation', 'emails', 'phones', 'address', 'city', 'state', 'pin', 'language', 'order_refs', 'subscriber_numbers', 'books', 'gstin', 'threads', 'waiting', 'first_contact', 'last_contact_at', 'notes'];
+	const cell = (v: any) => { const s = Array.isArray(v) ? v.join('; ') : v instanceof Date ? v.toISOString().slice(0, 10) : v === null || v === undefined ? '' : String(v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+	const lines = [cols.join(','), ...res.rows.map((r: any) => cols.map((c) => cell(c in r.p ? (r.p as any)[c] : r[c])).join(','))];
+	await audit(ctx, 'export.customer_db', 'customer', null, { rows: res.rows.length });
+	return new Response(lines.join('\n'), { headers: { 'content-type': 'text/csv; charset=utf-8', 'content-disposition': `attachment; filename="remail-customers-${new Date().toISOString().slice(0, 10)}.csv"` } });
+});
+r.patch('/api/customer-db/:id', async (ctx) => {
+	requireRole(ctx.user, 'analyst');
+	const res = await updateProfile(ctx.user!.orgId, Number(ctx.params.id), ctx.body || {});
+	await audit(ctx, 'customer.profile_edited', 'customer', Number(ctx.params.id), { fields: Object.keys(ctx.body || {}) });
+	return res;
+});
+r.post('/api/customer-db/:id/refresh', async (ctx) => {
+	requireRole(ctx.user, 'analyst');
+	const c = await one<any>('select id from customers where id=$1 and org_id=$2', [Number(ctx.params.id), ctx.user!.orgId]);
+	if (!c) throw new HttpError(404, 'Customer not found');
+	const res = await buildProfile(c.id, ctx.body?.ai !== false);
+	await enrichCustomer(c.id, { web: true }).catch((e) => console.error('[enrich]', e.message));
+	return { ...res, customer: await one<any>('select * from customers where id=$1', [c.id]).then((r) => ({ ...r, p: mergedProfile(r) })) };
 });
 
 r.post('/api/system/demo', async (ctx) => {
@@ -1044,10 +1421,13 @@ async function setupCheck() {
 		const pw = process.env.ADMIN_PASSWORD || '';
 		checks.ADMIN_PASSWORD_strength = { ok: pw.length >= 10 && /[A-Za-z]/.test(pw) && /\d/.test(pw), detail: pw.length >= 10 ? 'ok' : 'shorter than 10 characters' };
 	}
-	checks.microsoft_sign_in = { ok: has('MS_CLIENT_ID') && has('MS_CLIENT_SECRET'), detail: has('MS_CLIENT_ID') && has('MS_CLIENT_SECRET') ? 'enabled' : 'optional: MS_CLIENT_ID / MS_CLIENT_SECRET not set' };
+	checks.google_sign_in = { ok: googleConfigured(), detail: googleConfigured() ? `enabled${process.env.GOOGLE_SSO_ALLOWED_DOMAINS ? ` for ${process.env.GOOGLE_SSO_ALLOWED_DOMAINS}` : ''}` : 'Missing GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET' };
+	try { await loadServiceAccount(true); } catch { /* database not ready */ }
+	const sa = serviceAccount();
+	checks.google_workspace_shared_mailboxes = { ok: !!sa, detail: sa ? `service account ${sa.client_email} (client ID ${sa.client_id})` : has('GOOGLE_SERVICE_ACCOUNT_JSON') ? 'GOOGLE_SERVICE_ACCOUNT_JSON is not valid JSON' : 'optional: upload the service account key in Admin → Mailboxes' };
 	checks.ai = { ok: true, detail: `${aiProvider()} · ${aiModel()}` };
 	checks.site_url = { ok: true, detail: appUrl() };
-	const ok = Object.entries(checks).every(([k, v]) => v.ok || k === 'microsoft_sign_in');
+	const ok = Object.entries(checks).every(([k, v]) => v.ok || k === 'google_workspace_shared_mailboxes');
 	return { ok, time: new Date().toISOString(), checks };
 }
 
@@ -1075,6 +1455,7 @@ export async function handle(req: Request): Promise<Response> {
 	try {
 		await ensureSchema();
 		await defaultOrgId();
+		await loadServiceAccount();
 		if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) {
 			const text = await req.text();
 			if (text.length > 25_000_000) throw new HttpError(413, 'Request too large');

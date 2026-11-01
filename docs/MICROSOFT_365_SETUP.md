@@ -5,7 +5,7 @@ remail is Microsoft 365-first. One app registration in Microsoft Entra ID handle
 | Capability | What it does | Microsoft permission |
 | --- | --- | --- |
 | **Sign in with Microsoft** | Staff sign in with their Office 365 work account | Delegated `openid profile email User.Read` |
-| **Connect my Outlook** | Anyone links their own mailbox. It powers My day and their individual view, and is the way to test with your own email. | Delegated `Mail.Read`, `offline_access` |
+| **Connect my Outlook** | Anyone links their own mailbox. It powers My day and their individual view, and is the way to test with your own email. | Delegated `Mail.Read`, `offline_access`, plus `Mail.Send` to send approved replies |
 | **Organisation mailboxes** | Shared mailboxes (customerservice@, dispatch@, accounts@ …) are monitored after a one-time admin consent | Application `Mail.Read`, restricted to named mailboxes |
 
 Every permission is read-only. remail never sends, moves, deletes or flags anything in a monitored mailbox.
@@ -26,8 +26,8 @@ Do this in the tenant that owns the app: Ravity's tenant (ravity.io) for testing
    * For local testing you can also add `http://localhost:8888/...` versions of all three.
 3. Under **Certificates & secrets → New client secret**, copy the **Value** (not the ID).
 4. Under **API permissions → Add → Microsoft Graph**, add:
-   * **Delegated:** `openid`, `profile`, `email`, `offline_access`, `User.Read`, `Mail.Read`
-   * **Application:** `Mail.Read`
+   * **Delegated:** `openid`, `profile`, `email`, `offline_access`, `User.Read`, `Mail.Read`, `Mail.Send` (to send approved reply drafts from a person's own Outlook)
+   * **Application:** `Mail.Read`, and `Mail.Send` if replies should be sent from the shared mailboxes (restrict both with the access policy in step 4)
    * Optional, only if alerts should be sent from a Microsoft 365 mailbox: **Application** `Mail.Send`, and restrict it to that one mailbox as in step 4.
 5. In Netlify, add these environment variables and redeploy:
 
@@ -76,3 +76,13 @@ Microsoft's newer equivalent is **RBAC for Applications** (`New-ManagementScope`
 * Throttling (HTTP 429) is retried with Microsoft's `Retry-After`. Expired delta tokens trigger an automatic resync of that folder.
 * Each email has an **Open in Outlook** link, and any action can be added to an Outlook calendar (.ics).
 * Alerts can go to a **Microsoft Teams** channel. Create a channel workflow "Post to a channel when a webhook request is received" and set `TEAMS_WEBHOOK_URL`.
+
+
+## Sending replies from Outlook
+
+Approved reply drafts (Replies to send) are sent as a real reply inside the original Outlook thread: remail creates the reply on the original message, puts in the approved text, the footer and the quoted thread, and sends it. The message appears in the mailbox's Sent Items.
+
+* **Own mailbox** (Connect my Outlook): needs delegated `Mail.Send`. People who connected before it was added are asked to reconnect once; until then their drafts can be copied but not sent.
+* **Shared mailboxes**: needs application `Mail.Send`, granted by admin consent, and the same access policy group as `Mail.Read` so the app can only send as the monitored mailboxes.
+* Set `MS_SEND_ENABLED=false` to switch sending off (drafts can still be copied into Outlook by hand).
+* A draft cannot be sent while it still has yellow `[[provide: …]]` items.

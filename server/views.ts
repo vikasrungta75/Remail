@@ -3,7 +3,8 @@ import { one, q } from './db';
 import type { SessionUser } from './auth';
 import { convFilter } from './queries';
 import { getOrg } from './settings';
-import { BUSINESS_CATEGORIES } from './ai/types';
+import { BUSINESS_CATEGORIES, BUSINESS_LABELS } from './ai/types';
+import { GROUP_DESCRIPTIONS, SUBCATEGORIES } from './ai/taxonomy';
 
 const W = (f: { where: string[] }) => f.where.join(' and ');
 
@@ -128,7 +129,7 @@ export async function proposals(user: SessionUser, qs: URLSearchParams) {
 	const f = await convFilter(user, a);
 	const rows = await q<any>(
 		`select c.id, c.subject, c.summary, c.proposal, coalesce(c.proposal_stage, 'request_received') as stage, c.proposal_stage_locked,
-		        c.last_message_at, c.first_message_at, c.awaiting_reply, c.rag, c.sentiment, c.status, c.is_internal,
+		        c.last_message_at, c.first_message_at, c.awaiting_reply, c.rag, c.sentiment, c.status, c.is_internal, c.mailbox_ids, c.urgency,
 		        cu.id as customer_id, cu.name as customer_name, cu.tier as customer_tier, u.full_name as assignee_name, c.assignee_id
 		   from conversations c left join customers cu on cu.id=c.customer_id left join users u on u.id=c.assignee_id
 		  where ${W(f)} order by (c.proposal->>'deadline') nulls last, c.last_message_at desc limit 500`,
@@ -182,4 +183,65 @@ export async function team(user: SessionUser, qs: URLSearchParams) {
 		people.set(base.email, { ...base, name: u.full_name || base.name, userId: u.id, role: u.role, ...(wl.get(u.id) || {}) });
 	}
 	return { rows: [...people.values()].sort((x, y) => (y.replies || 0) - (x.replies || 0)) };
+}
+
+/**
+ * Category report: headings are the groups, subheadings the subgroups, each with volumes, waiting
+ * replies, negative and red threads, response time, drafts waiting and the latest subjects.
+ */
+export async function categoryReport(user: SessionUser, qs: URLSearchParams) {
+	const a = new URLSearchParams(qs);
+	if (!a.get('audience')) a.set('audience', 'all');
+	const f = await convFilter(user, a);
+	const org = await getOrg(user.orgId);
+	const rows = await q<any>(
+		`select c.business_category as grp, coalesce(c.subcategory, '') as sub,
+		        count(*)::int as conversations,
+		        coalesce(sum(c.message_count),0)::int as emails,
+		        count(*) filter (where c.awaiting_reply and c.status in ('open','in_progress'))::int as awaiting,
+		        count(*) filter (where c.awaiting_reply and c.status in ('open','in_progress') and c.last_inbound_at < now() - make_interval(hours => ${org.settings.slaHours}))::int as overdue_replies,
+		        count(*) filter (where c.sentiment='negative')::int as negative,
+		        count(*) filter (where c.rag='red' and c.status in ('open','in_progress'))::int as red,
+		        round(avg(c.first_response_minutes) / 60.0, 1)::float as avg_first_response_hours,
+		        count(d.id) filter (where d.status='draft')::int as drafts_waiting
+		   from conversations c left join reply_drafts d on d.conversation_id=c.id
+		  where ${W(f)} group by 1,2`,
+		f.params,
+	);
+	const recent = await q<any>(
+		`select * from (
+		   select c.id, c.business_category as grp, coalesce(c.subcategory,'') as sub, c.subject, c.rag, c.last_message_at, cu.name as customer_name,
+		          row_number() over (partition by c.business_category, c.subcategory order by c.last_message_at desc) rn
+		     from conversations c left join customers cu on cu.id=c.customer_id where ${W(f)}
+		 ) x where rn <= 3`,
+		f.params,
+	);
+	// weekly volume per group for the last 12 weeks (trend lines)
+	const weeks = await q<any>(
+		`select c.business_category as grp, floor(extract(epoch from (date_trunc('week', now()) - date_trunc('week', c.first_message_at))) / 604800)::int as ago, count(*)::int as n
+		   from conversations c where ${W(f)} and c.first_message_at > date_trunc('week', now()) - interval '11 weeks'
+		  group by 1,2`,
+		f.params,
+	);
+	const weekly = (g: string) => Array.from({ length: 12 }, (_x, i) => weeks.find((w) => w.grp === g && w.ago === 11 - i)?.n || 0);
+	const zero = { conversations: 0, emails: 0, awaiting: 0, overdue_replies: 0, negative: 0, red: 0, avg_first_response_hours: null, drafts_waiting: 0 };
+	const sum = (list: any[], k: string) => list.reduce((n, x) => n + (Number(x[k]) || 0), 0);
+	const groups = BUSINESS_CATEGORIES.map((g) => {
+		const defs = [...SUBCATEGORIES[g]];
+		// threads not yet given a subgroup are shown as their own line until the background back-fill reaches them
+		if (rows.some((r) => r.grp === g && (!r.sub || !defs.some((d) => d.key === r.sub)))) defs.push({ key: '', label: 'Not yet sorted', description: 'Waiting for the background job to assign a subgroup.', replies: false });
+		const subgroups = defs.map((d) => {
+			const m = rows.filter((r) => r.grp === g && (d.key ? r.sub === d.key : !SUBCATEGORIES[g].some((x) => x.key === r.sub)));
+			const st = m.length ? {
+				conversations: sum(m, 'conversations'), emails: sum(m, 'emails'), awaiting: sum(m, 'awaiting'), overdue_replies: sum(m, 'overdue_replies'),
+				negative: sum(m, 'negative'), red: sum(m, 'red'), drafts_waiting: sum(m, 'drafts_waiting'),
+				avg_first_response_hours: m.find((x) => x.avg_first_response_hours !== null)?.avg_first_response_hours ?? null,
+			} : zero;
+			return { key: d.key, label: d.label, description: d.description, ...st, recent: recent.filter((r) => r.grp === g && r.sub === d.key) };
+		});
+		const total = { conversations: sum(subgroups, 'conversations'), emails: sum(subgroups, 'emails'), awaiting: sum(subgroups, 'awaiting'), overdue_replies: sum(subgroups, 'overdue_replies'), negative: sum(subgroups, 'negative'), red: sum(subgroups, 'red'), drafts_waiting: sum(subgroups, 'drafts_waiting') };
+		return { key: g, label: BUSINESS_LABELS[g], description: GROUP_DESCRIPTIONS[g], ...total, subgroups, weekly: weekly(g) };
+	});
+	const totals = { conversations: sum(groups, 'conversations'), emails: sum(groups, 'emails'), awaiting: sum(groups, 'awaiting'), overdue_replies: sum(groups, 'overdue_replies'), negative: sum(groups, 'negative'), red: sum(groups, 'red'), drafts_waiting: sum(groups, 'drafts_waiting') };
+	return { from: f.from, to: f.to, totals, groups: groups.sort((x, y) => y.conversations - x.conversations) };
 }

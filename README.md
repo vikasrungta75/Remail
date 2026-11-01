@@ -61,12 +61,37 @@ The look and the sign-in come from **rfleet.ai**. You sign in with your Ravity a
 * Delivered in-app, by email, to Microsoft Teams or to Slack.
 * Alerts that aren't acknowledged escalate to a second level.
 
+**Replies to send**
+* A complete reply draft is written for every thread waiting on Wheel King, in the customer's language (English or French), following the default template for its subgroup.
+* Anything the AI cannot know (an ETA, a rate, a credit amount) is marked as a yellow `[[provide: …]]` item. Type the answers into the small boxes and press **Add and rewrite**: the AI rewrites the whole email around them.
+* Send from Outlook (or Gmail) inside the original thread, with the head office or local location footer. Send is blocked while yellow items remain.
+* Filters for group, subgroup, rating, mailbox, date and status as compact dropdowns on one line.
+
+**Groups, subgroups and templates**
+* Twelve groups (customer service, sales and proposals, operations, fleet and maintenance, billing and finance, compliance and safety, vendors, people, internal, events, notifications, other) and around fifty logistics subgroups.
+* 41 editable default reply templates with `{{name}}`, `{{order_ref}}`, `{{unit}}` and `{{signature}}`.
+* A category report with headings and subheadings, waiting counts and CSV export.
+
+**Reference information**
+* Upload rates and services, FAQs and policies as CSV. Matching entries (by lane code, service code or keywords) are given to the AI so drafts quote the real rate or policy.
+
+**Customer database**
+* A profile per customer built by AI from their emails (rules fallback): type, organisation, contacts, address, province or state, postal code, language, load and PO numbers, accounts, lanes, GST/HST, USDOT and MC numbers.
+* Enrichment from public sources only: province from the postal code, the FMCSA company snapshot for a USDOT number, and the organisation's own website. Private individuals are never looked up.
+* Possible duplicates by shared phone or address; manual edits are kept separately and always win.
+
+**Accuracy controls (false positives)**
+* Cold marketing and sales pitches are not counted as waiting for a reply.
+* Short "thanks / received" notes close a thread.
+* Old unanswered threads can be cleared in bulk from Processing status.
+* If the AI provider rejects the key, analysis pauses with a banner and the rules engine keeps sorting mail.
+
 **Mail Sage**
 * Ask questions about any email in plain English.
 * Answers cite the source threads.
 
 **Security**
-* Read-only Graph scopes.
+* Read-only Graph scopes, plus `Mail.Send` only when reply sending is switched on (`MS_SEND_ENABLED`).
 * Encrypted tokens.
 * Revocable sessions.
 * Role-based access (admin, manager, analyst, viewer) with per-mailbox restriction.

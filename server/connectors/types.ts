@@ -35,7 +35,7 @@ export interface SyncBatch {
 export interface MailboxRow {
 	id: number;
 	org_id: number;
-	provider: 'microsoft' | 'microsoft_app' | 'gmail' | 'upload' | 'demo';
+	provider: 'microsoft' | 'microsoft_app' | 'gmail' | 'gmail_app' | 'upload' | 'demo';
 	address: string;
 	display_name: string;
 	credentials_enc: string | null;

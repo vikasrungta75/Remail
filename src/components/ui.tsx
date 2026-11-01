@@ -135,9 +135,60 @@ export function RagBar({ red, amber, green }: { red: number; amber: number; gree
 	);
 }
 
-export const Loader = ({ text = 'Loading' }: { text?: string }) => (
-	<div className="loader"><span className="spin" />{text}</div>
+/** Loading: the shape of what is coming (placeholder cards) with a short note of what is being prepared. */
+export const Loader = ({ text = 'Loading', small }: { text?: string; small?: boolean }) => (
+	<div className="skel" role="status" aria-live="polite">
+		<div className="sk-note"><span className="spin" />{text}…</div>
+		{!small && <div className="sk-grid"><div className="sk-card"><i /><i /><i className="sk-ch" /></div><div className="sk-card"><i /><i /><i className="sk-ch" /></div></div>}
+	</div>
 );
+
+/** Summary at the top of a page: the headline, the points behind it and the next step. */
+export function Story({ head, points = [], next, label = 'In brief' }: { head: ReactNode; points?: ReactNode[]; next?: ReactNode; label?: string }) {
+	return (
+		<div className="story">
+			<span className="story-chip">{label}</span>
+			<h2>{head}</h2>
+			{points.filter(Boolean).length > 0 && <ul>{points.filter(Boolean).map((p, i) => <li key={i}>{p}</li>)}</ul>}
+			{next && <div className="story-next"><b>Next:</b> {next}</div>}
+		</div>
+	);
+}
+
+/** Inline bar for a share or score inside a table row. */
+export const Meter = ({ v, max = 100, tone, w = 72 }: { v: number; max?: number; tone?: 'red' | 'amber' | 'green' | ''; w?: number }) => (
+	<span className="meter" style={{ width: w }} title={`${Math.round((v / (max || 1)) * 100)}%`}><i className={tone || ''} style={{ width: `${Math.min(100, (v / (max || 1)) * 100)}%` }} /></span>
+);
+
+/** Tiny trend line. */
+export const Sparkline = ({ v, w = 86, h = 22, color = 'var(--pink)' }: { v: number[]; w?: number; h?: number; color?: string }) => {
+	if (!v.length) return null;
+	const mx = Math.max(1, ...v);
+	const pts = v.map((x, i) => `${(i / Math.max(1, v.length - 1)) * w},${h - 2 - (x / mx) * (h - 4)}`).join(' ');
+	return <svg className="spark" width={w} height={h} viewBox={`0 0 ${w} ${h}`} aria-hidden="true"><polyline points={pts} fill="none" stroke={color} strokeWidth="1.6" strokeLinejoin="round" /></svg>;
+};
+
+/** Key facts as small labelled boxes. */
+export const Facts = ({ items }: { items: [ReactNode, ReactNode][] }) => (
+	<div className="facts">{items.filter((x) => x[1] !== null && x[1] !== undefined && x[1] !== '').map((x, i) => <div key={i}><span>{x[0]}</span><b>{x[1]}</b></div>)}</div>
+);
+
+/** Toggle chips for quick filters; several can be on at once unless single is set. */
+export function Chips<T extends string>({ options, value, onChange, single }: { options: { v: T; l: ReactNode; n?: number; tone?: string }[]; value: T[]; onChange: (v: T[]) => void; single?: boolean }) {
+	return (
+		<div className="chips" role="group">
+			{options.map((o) => {
+				const on = value.includes(o.v);
+				return (
+					<button key={o.v} type="button" aria-pressed={on} className={o.tone ? `tone-${o.tone}` : ''}
+						onClick={() => onChange(on ? value.filter((x) => x !== o.v) : single ? [o.v] : [...value, o.v])}>
+						{o.l}{o.n !== undefined && <span className="n">{o.n.toLocaleString('en-CA')}</span>}
+					</button>
+				);
+			})}
+		</div>
+	);
+}
 
 export const Empty = ({ text, icon }: { text: ReactNode; icon?: ReactNode }) => (
 	<div className="empty">{icon || <MdInbox />}{text}</div>

@@ -108,10 +108,21 @@ export interface ThreadInput {
 	isInternal: boolean;
 	isAutomated: boolean;
 	messages: ThreadMessage[];
+	/** Facts the team has given for replies: transit times, rates, policies (Settings → Reply drafts) */
+	replyKnowledge?: string;
+	replySignature?: string;
+	/** default reply templates for the likely subgroup(s), as plain text */
+	replyTemplates?: { group: string; subgroup: string; label: string; body: string }[];
+	/** what the customer database knows about this customer (address, account numbers, lanes) */
+	customerProfile?: string;
+	/** matched rate, service, FAQ and policy entries from the reference data */
+	reference?: { kind: string; title: string; text: string }[];
 }
 
 export interface Analysis {
 	business_category: BusinessCategory;
+	/** subgroup within business_category, see taxonomy.ts */
+	subcategory: string;
 	proposal: null | {
 		kind: string; // rfq, rfp, tender, quote, rate_request, proposal, contract_renewal
 		stage: ProposalStage;
@@ -158,6 +169,7 @@ export const ANALYSIS_SCHEMA = {
 	type: 'object',
 	properties: {
 		business_category: { type: 'string', enum: [...BUSINESS_CATEGORIES], description: 'What kind of email thread this is. customer_service = a customer raising an issue or service request; sales_proposal = quotes, rate requests, RFQ/RFP/tenders, proposals, contract renewals (either direction); operations = loads, dispatch, pickups, deliveries, scheduling; fleet_maintenance = trucks, trailers, repairs, telematics/ELD equipment; billing_finance = invoices, payments, credit, accounting; compliance_safety = safety, insurance, accidents, claims, audits, regulations; vendor_partner = suppliers, partners, software and service providers; people_hr = drivers, staff, hiring, payroll; internal = only staff talking to each other about anything not above; events_marketing = events, webinars, newsletters, marketing; notifications = automated system messages.' },
+		subcategory: { type: 'string', description: 'The subgroup within business_category. Use one key from the list for that group given in the prompt.' },
 		proposal: {
 			type: ['object', 'null'],
 			description: 'Only for sales_proposal threads, otherwise null.',
@@ -209,9 +221,9 @@ export const ANALYSIS_SCHEMA = {
 		entities: {
 			type: 'object',
 			properties: {
-				shipment_refs: { type: 'array', items: { type: 'string' } },
+				shipment_refs: { type: 'array', items: { type: 'string' }, description: 'Load, PRO, BOL, PO, booking and tracking numbers' },
 				invoice_refs: { type: 'array', items: { type: 'string' } },
-				vehicle_regs: { type: 'array', items: { type: 'string' } },
+				vehicle_regs: { type: 'array', items: { type: 'string' }, description: 'Truck, trailer and unit numbers or plates' },
 				amounts: { type: 'array', items: { type: 'string' } },
 				locations: { type: 'array', items: { type: 'string' } },
 				dates: { type: 'array', items: { type: 'string' } },
@@ -230,13 +242,13 @@ export const ANALYSIS_SCHEMA = {
 			},
 		},
 		requires_reply: { type: 'boolean' },
-		suggested_reply: { type: 'string', description: 'A short, professional draft reply from the logistics company, or empty if none needed. Never invent facts; use placeholders like [ETA].' },
+		suggested_reply: { type: 'string', description: 'When a reply is needed, a COMPLETE reply ready to send from the company, answering every question in the latest messages; facts you do not know are written as [[provide: what the team must fill in]]. Empty if no reply is needed.' },
 		rag_suggestion: { type: 'string', enum: ['red', 'amber', 'green'] },
 		rag_reason: { type: 'string', description: 'One sentence explaining the RAG rating.' },
 		legal_or_churn_signal: { type: 'boolean', description: 'Mentions of legal action, contract termination, switching supplier, formal claims or penalties.' },
 	},
 	required: [
-		'business_category', 'proposal', 'summary', 'sentiment', 'sentiment_score', 'customer_state', 'urgency', 'escalation_risk', 'categories', 'topics',
+		'business_category', 'subcategory', 'proposal', 'summary', 'sentiment', 'sentiment_score', 'customer_state', 'urgency', 'escalation_risk', 'categories', 'topics',
 		'issues', 'action_items', 'entities', 'message_sentiments', 'requires_reply', 'suggested_reply', 'rag_suggestion',
 		'rag_reason', 'legal_or_churn_signal',
 	],

@@ -409,7 +409,7 @@ alter table customers add column if not exists kind_locked boolean not null defa
 update conversations set needs_analysis = true;
 ` },
 { id: '003_remove_demo_data', sql: String.raw`
--- one-time clean-up: remove the Wheel King demo dataset so only real mail remains
+-- one-time clean-up: remove any demo dataset so only real mail remains
 delete from conversations where id in (
   select distinct e.conversation_id from emails e join mailboxes m on m.id = e.mailbox_id
    where m.provider = 'demo' and e.conversation_id is not null);
@@ -417,5 +417,112 @@ delete from mailboxes where provider = 'demo';
 delete from customers c where not exists (select 1 from conversations v where v.customer_id = c.id);
 delete from alerts where conversation_id is null and customer_id is null;
 delete from action_items where conversation_id is null and source = 'demo';
+` },
+{ id: '004_google_workspace', sql: String.raw`
+-- Gmail edition: Google sign-in and Workspace shared mailboxes (domain-wide delegation)
+alter table mailboxes drop constraint if exists mailboxes_provider_check;
+alter table mailboxes add constraint mailboxes_provider_check check (provider in ('microsoft','microsoft_app','gmail','gmail_app','upload','demo'));
+alter table users drop constraint if exists users_auth_provider_check;
+alter table users add constraint users_auth_provider_check check (auth_provider in ('local','ravity','microsoft','google'));
+alter table users add column if not exists google_sub text;
+create unique index if not exists users_google_sub_uq on users (google_sub) where google_sub is not null;
+` },
+{ id: '005_reply_drafts', sql: String.raw`
+-- AI-drafted replies, kept in the app until a person presses Send (then sent through Gmail in-thread)
+create table if not exists reply_drafts (
+  id               bigserial primary key,
+  org_id           bigint not null references organisations(id) on delete cascade,
+  conversation_id  bigint not null references conversations(id) on delete cascade,
+  body             text not null default '',
+  generated_body   text not null default '',
+  model            text,
+  edited           boolean not null default false,
+  status           text not null default 'draft' check (status in ('draft','sent','dismissed','replied_elsewhere')),
+  to_addresses     text[] not null default '{}',
+  cc_addresses     text[] not null default '{}',
+  subject          text not null default '',
+  reply_to_email_id bigint references emails(id) on delete set null,
+  send_mailbox_id  bigint references mailboxes(id) on delete set null,
+  generated_at     timestamptz not null default now(),
+  updated_at       timestamptz not null default now(),
+  updated_by       bigint references users(id) on delete set null,
+  sent_at          timestamptz,
+  sent_by          bigint references users(id) on delete set null,
+  provider_message_id text,
+  last_error       text
+);
+create unique index if not exists reply_drafts_conv_uq on reply_drafts (conversation_id);
+create index if not exists reply_drafts_org_status_idx on reply_drafts (org_id, status, generated_at desc);
+alter table mailboxes alter column backfill_days set default 90;
+` },
+{ id: '006_worker_lease_ai_state', sql: String.raw`
+-- one background run at a time (the scheduler fires every 5 minutes, a run lasts up to 13)
+create table if not exists worker_lease (
+  name   text primary key,
+  holder text,
+  until  timestamptz not null default now()
+);
+-- AI provider back-off: when the quota is used up, analysis pauses instead of retrying
+create table if not exists ai_state (
+  id            int primary key default 1,
+  paused_until  timestamptz,
+  last_error    text,
+  last_error_at timestamptz,
+  check (id = 1)
+);
+insert into ai_state (id) values (1) on conflict do nothing;
+` },
+{ id: '007_ai_state_provider', sql: String.raw`
+-- a quota pause belongs to one provider, so switching provider is not held back by the old one's pause
+alter table ai_state add column if not exists provider text;
+` },
+{ id: '008_subgroups_templates_reference', sql: String.raw`
+-- subgroup (subheading) within business_category
+alter table conversations add column if not exists subcategory text;
+alter table conversations add column if not exists subcategory_locked boolean not null default false;
+create index if not exists conversations_org_cat_sub_idx on conversations (org_id, business_category, subcategory);
+-- default reply template per subgroup; seeded from server/templates.ts, editable by admins
+create table if not exists reply_templates (
+  id          bigserial primary key,
+  org_id      bigint not null references organisations(id) on delete cascade,
+  group_key   text not null,
+  subgroup_key text not null,
+  title       text not null,
+  body        text not null,
+  guidance    text not null default '',
+  is_active   boolean not null default true,
+  is_default  boolean not null default true,
+  updated_at  timestamptz not null default now(),
+  updated_by  bigint references users(id) on delete set null,
+  unique (org_id, group_key, subgroup_key)
+);
+-- reference data used in drafts: book catalogue, FAQs and policies
+create table if not exists reference_items (
+  id          bigserial primary key,
+  org_id      bigint not null references organisations(id) on delete cascade,
+  kind        text not null check (kind in ('book','faq','policy')),
+  code        text,
+  title       text not null,
+  body        text not null default '',
+  keywords    text[] not null default '{}',
+  data        jsonb not null default '{}',
+  updated_at  timestamptz not null default now()
+);
+create index if not exists reference_items_org_kind_idx on reference_items (org_id, kind);
+create unique index if not exists reference_items_code_uq on reference_items (org_id, kind, code) where code is not null;
+-- existing threads get a subgroup from the rules engine in the background (no AI cost); new mail gets it from the AI
+` },
+{ id: '009_customer_profiles', sql: String.raw`
+-- customer database: what is known about each shipper, broker, carrier, consignee or supplier, gathered from their emails
+alter table customers add column if not exists profile jsonb not null default '{}';
+alter table customers add column if not exists profile_manual jsonb not null default '{}';
+alter table customers add column if not exists profile_source text;
+alter table customers add column if not exists profile_at timestamptz;
+create index if not exists customers_profile_at_idx on customers (org_id, profile_at);
+` },
+{ id: '010_customer_enrichment', sql: String.raw`
+-- what remail adds to a customer record: activity, region from postal code, possible duplicates, an organisation's own website
+alter table customers add column if not exists enrichment jsonb not null default '{}';
+alter table customers add column if not exists enriched_at timestamptz;
 ` },
 ];

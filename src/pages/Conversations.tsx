@@ -6,6 +6,7 @@ import { api, qs } from '../api/client';
 import { useFilters } from '../contexts/FilterContext';
 import FilterBar from '../components/FilterBar';
 import { Card, Empty, Loader, PageHead, RagDot, SentimentBadge, StatusBadge, TierBadge, UrgencyBadge } from '../components/ui';
+import { useTaxonomy } from '../lib/taxonomy';
 import { BUSINESS_COLORS, BUSINESS_SHORT, STAGE_LABELS, ago, catLabel, hoursSince } from '../lib/format';
 
 const SORTS = [
@@ -26,7 +27,8 @@ const AUDIENCES = [
 ];
 
 export function ConversationList({ preset = {}, defaultSort = 'priority', showSearch = true, showAudience = false }: { preset?: Record<string, unknown>; defaultSort?: string; showSearch?: boolean; showAudience?: boolean }) {
-	const { params } = useFilters();
+	const { params, filters, set } = useFilters();
+	const { subLabel } = useTaxonomy();
 	const nav = useNavigate();
 	const [sp, setSp] = useSearchParams();
 	const [q, setQ] = useState(sp.get('q') || '');
@@ -53,6 +55,12 @@ export function ConversationList({ preset = {}, defaultSort = 'priority', showSe
 					</form>
 				)}
 				<div className="row wrap">
+					{filters.sub?.length > 0 && (
+						<span className="chip" title="Subgroup filter from the category report">
+							Subgroup: {filters.sub.map((k) => subLabel(filters.type[0], k) || k).join(', ')}
+							<button type="button" className="btn ghost sm" style={{ padding: '0 4px', minHeight: 0 }} onClick={() => set({ sub: [] })} aria-label="Clear subgroup filter">×</button>
+						</span>
+					)}
 					{showAudience && (
 						<select className="input" style={{ width: 260 }} value={audience} onChange={(e) => setAudience(e.target.value)} aria-label="Which email">
 							{AUDIENCES.map((a) => <option key={a.v} value={a.v}>{a.l}</option>)}
@@ -88,9 +96,9 @@ export function ConversationList({ preset = {}, defaultSort = 'priority', showSe
 											<div className="row" style={{ fontWeight: 700 }}>
 												<span className="truncate">{c.customer_name || (c.is_automated ? 'Automated' : 'Internal')}</span> <TierBadge tier={c.customer_tier} />
 											</div>
-											<div className="row gap-4"><span className="chip" style={{ background: BUSINESS_COLORS[c.business_category] + '22', color: 'var(--text)' }}>{BUSINESS_SHORT[c.business_category] || 'Other'}</span>{c.proposal_stage && <span className="chip">{STAGE_LABELS[c.proposal_stage]}</span>}</div>
+											<div className="tag-line"><span className="chip" style={{ background: BUSINESS_COLORS[c.business_category] + '22', color: 'var(--text)' }}>{BUSINESS_SHORT[c.business_category] || 'Other'}</span>{subLabel(c.business_category, c.subcategory) && <span className="chip">{subLabel(c.business_category, c.subcategory)}</span>}{c.proposal_stage && <span className="chip">{STAGE_LABELS[c.proposal_stage]}</span>}</div>
 											<div className="truncate muted">{c.subject || '(no subject)'}</div>
-											<div className="row wrap mt-8 gap-4">
+											<div className="tag-line mt-8">
 												{(c.categories || []).slice(0, 3).map((x: string) => <span key={x} className="chip">{catLabel(x)}</span>)}
 											</div>
 										</td>
@@ -142,6 +150,7 @@ export function EmailTabs() {
 	const nav = useNavigate();
 	const tabs = [
 		{ path: '/all-email', label: 'By category' },
+		{ path: '/category-report', label: 'Category report' },
 		{ path: '/critical', label: 'Needs attention' },
 		{ path: '/conversations', label: 'All threads' },
 	];

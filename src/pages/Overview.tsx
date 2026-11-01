@@ -7,7 +7,7 @@ import { useAuth } from '../contexts/AuthContext';
 import { useToast } from '../contexts/ToastContext';
 import FilterBar from '../components/FilterBar';
 import Chart from '../components/Chart';
-import { Card, Empty, Health, Kpi, Loader, PageHead, RagDot, TierBadge, StateBadge, UrgencyBadge } from '../components/ui';
+import { Card, Empty, Health, Kpi, Loader, PageHead, RagDot, Story, TierBadge, StateBadge, UrgencyBadge } from '../components/ui';
 import { COLORS, ago, catLabel, minutes, pct, hoursSince, fmtDate } from '../lib/format';
 
 export default function Overview() {
@@ -59,8 +59,23 @@ export default function Overview() {
 			/>
 			<FilterBar />
 
-			{!s ? <Loader /> : (
+			{!s ? <Loader text="Preparing the overview" /> : (
 				<>
+					{k.conversations > 0 && (() => {
+						const negNow = pct(k.negative, k.conversations), negBefore = pct(p.negative, p.conversations);
+						const change = k.conversations - p.conversations;
+						return (
+							<Story
+								head={<>{k.conversations.toLocaleString('en-CA')} customer conversations in this period{p.conversations ? <>, {change >= 0 ? 'up' : 'down'} {Math.abs(change).toLocaleString('en-CA')} on the period before</> : null}; {k.red} are rated red.</>}
+								points={[
+									<>{negNow}% were negative{p.conversations ? <> ({negNow === negBefore ? 'no change' : `${negNow > negBefore ? 'up' : 'down'} from ${negBefore}%`})</> : null}.</>,
+									k.avg_first_response_min != null ? <>Average first reply took {minutes(k.avg_first_response_min)}.</> : null,
+									(s.customers?.at_risk || s.customers?.dissatisfied) ? <>{(s.customers?.at_risk || 0) + (s.customers?.dissatisfied || 0)} customers are at risk or dissatisfied.</> : null,
+								]}
+								next={k.red ? <>Open <b>Email → Needs attention</b> and answer the red threads first.</> : <>Clear the ready drafts in <b>Replies to send</b>.</>}
+							/>
+						);
+					})()}
 					<div className="grid g-6 mb-16">
 						<Kpi label="Conversations" icon={<MdForum />} value={k.conversations} delta={k.conversations - p.conversations} accent={COLORS.blue}
 							foot={<span>{k.emails} emails · {k.duplicates} duplicates removed</span>} onClick={() => nav('/conversations')} />

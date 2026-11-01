@@ -1,6 +1,11 @@
+import { upsertDraft } from './drafts';
 import { one, q } from './db';
-import { analyseThread } from './ai/llm';
-import { heuristicAnalyse } from './ai/heuristic';
+import { aiPaused, analyseThread } from './ai/llm';
+import { guessSubcategory, heuristicAnalyse } from './ai/heuristic';
+import { normaliseSubcategory } from './ai/taxonomy';
+import { getTemplate, renderTemplate, templatesForGroup } from './templates';
+import { matchReference } from './reference';
+import { profileForPrompt } from './profiles';
 import type { ThreadInput } from './ai/types';
 import { getOrg } from './settings';
 import { score, healthScore, healthStatus } from './scoring';
@@ -11,11 +16,14 @@ import { evaluateConversationAlerts, evaluateHealthAlert } from './alerts';
 const MAX_MESSAGES = 14;
 
 export async function analysePending(orgId: number, limit = 25, deadline = Date.now() + 60_000) {
+	// new and changed threads first; threads that fell back to the rules engine are retried only while the AI is available
+	const retryFallbacks = !(await aiPaused());
 	const rows = await q<{ id: number }>(
 		`select id from conversations where org_id=$1 and message_count > 0
-		   and (needs_analysis or (analysis_model like '%(fallback)%' and analysed_at < now() - interval '30 minutes'))
-		 order by last_message_at desc limit $2`,
-		[orgId, limit],
+		   and (needs_analysis or ($3 and analysis_model like '%(fallback)%' and analysed_at < now() - interval '30 minutes'
+		     and (awaiting_reply or last_message_at > now() - interval '30 days')))
+		 order by needs_analysis desc, last_message_at desc limit $2`,
+		[orgId, limit, retryFallbacks],
 	);
 	let done = 0;
 	const customers = new Set<number>();
@@ -57,6 +65,9 @@ export async function analyseConversation(conversationId: number): Promise<numbe
 		orgName: org.name,
 		isInternal: !conv.customer_id || conv.is_internal,
 		isAutomated: !!conv.is_automated,
+		replyKnowledge: org.settings.replyKnowledge || '',
+		replySignature: org.settings.replySignature || '',
+		customerProfile: conv.customer_id ? profileForPrompt((await one<any>('select profile, profile_manual from customers where id=$1', [conv.customer_id])) || {}) : '',
 		messages: emails.map((e, idx) => {
 			const body = (e.body_clean || e.body_text || '').slice(0, 3000);
 			return {
@@ -72,10 +83,38 @@ export async function analyseConversation(conversationId: number): Promise<numbe
 		}),
 	};
 
+	// the rules engine's guess of the group picks which default templates and reference data go into the prompt
+	const guess = heuristicAnalyse(input);
+	if (!input.isAutomated && !input.isInternal) {
+		const inboundText = input.messages.filter((m) => m.direction === 'inbound').map((m) => `${m.subject}\n${m.body}`).join('\n');
+		try {
+			input.replyTemplates = await templatesForGroup(org.id, guess.business_category, guess.subcategory);
+			input.reference = await matchReference(org.id, inboundText);
+		} catch (e: any) {
+			console.error('[analyse] templates/reference', e.message);
+		}
+	}
+
 	// Automated notifications never need an AI call — the rules engine is enough
 	const { analysis, model } = input.isAutomated
-		? { analysis: heuristicAnalyse(input), model: 'remail-heuristic-v1' }
+		? { analysis: guess, model: 'remail-heuristic-v1' }
 		: await analyseThread(input, org.id);
+	analysis.subcategory = normaliseSubcategory(analysis.business_category, analysis.subcategory);
+	// without the AI, the reply is the default template for the subgroup, with what the rules engine could fill in
+	if (model.startsWith('remail-heuristic') && analysis.requires_reply && !input.isAutomated) {
+		const t = await getTemplate(org.id, analysis.business_category, analysis.subcategory).catch(() => null);
+		if (t) {
+			const lastIn = [...input.messages].reverse().find((m) => m.direction === 'inbound');
+			{
+				analysis.suggested_reply = renderTemplate(t.body, {
+					name: lastIn?.fromName?.split(' ')[0] || undefined,
+					orderRef: analysis.entities.shipment_refs[0],
+					book: analysis.entities.vehicle_regs[0],
+					signature: input.replySignature || `Kind regards,\n${org.name}`,
+				});
+			}
+		}
+	}
 	const external = !input.isInternal && !input.isAutomated;
 	if (!external) {
 		// internal and automated threads are not rated as customer risk
@@ -101,6 +140,7 @@ export async function analyseConversation(conversationId: number): Promise<numbe
 		   urgency=$8, escalation_risk=$9, priority_score=$10, categories=$11, topics=$12, entities=$13, suggested_reply=$14,
 		   analysis_model=$15, analysed_at=now(), needs_analysis=false, awaiting_reply=$16, updated_at=now(),
 		   business_category = case when category_locked then business_category else $17 end,
+		   subcategory = case when category_locked or subcategory_locked then subcategory else $20 end,
 		   proposal = $18,
 		   proposal_stage = case when proposal_stage_locked then proposal_stage else $19 end
 		 where id=$1`,
@@ -113,8 +153,16 @@ export async function analyseConversation(conversationId: number): Promise<numbe
 			analysis.business_category,
 			analysis.proposal ? JSON.stringify(analysis.proposal) : null,
 			analysis.proposal?.stage ?? null,
+			analysis.subcategory,
 		],
 	);
+
+	// a complete draft reply, kept in the app until someone presses Send
+	try {
+		await upsertDraft(conv, external && !!conv.awaiting_reply && analysis.requires_reply, analysis.suggested_reply, model);
+	} catch (e: any) {
+		console.error('[drafts]', e.message);
+	}
 
 	// per-message sentiment (feeds trend charts)
 	for (const ms of analysis.message_sentiments) {
@@ -162,7 +210,7 @@ export async function analyseConversation(conversationId: number): Promise<numbe
 			`update customers cu set kind = x.kind from (
 			   select case
 			     when count(*) filter (where business_category = 'vendor_partner') > count(*) / 2 then 'vendor'
-			     when count(*) filter (where business_category = 'sales_proposal') = count(*) and not exists (select 1 from conversations c2 where c2.customer_id=$1 and c2.business_category in ('customer_service','operations','billing_finance')) then 'prospect'
+			     when count(*) filter (where business_category = 'sales_proposal') = count(*) and not exists (select 1 from conversations c2 where c2.customer_id=$1 and c2.business_category in ('customer_service','book_orders','kalyan','dispatch','billing_finance')) then 'prospect'
 			     when count(*) filter (where business_category = 'people_hr') = count(*) then 'candidate'
 			     else 'customer' end as kind
 			   from conversations where customer_id=$1) x
@@ -267,4 +315,19 @@ export async function backfillHealthHistory(orgId: number, days = 60) {
 		   where d.customer_id=cu.id and d.day <= current_date - 7 order by d.day desc limit 1), 0) where cu.org_id=$1`,
 		[orgId],
 	);
+}
+
+/** Threads analysed before subgroups existed get one from the rules engine: no AI call, no cost. */
+export async function backfillSubcategories(orgId: number, limit = 400) {
+	const rows = await q<any>(
+		`select c.id, c.business_category, c.subject, c.summary,
+		   (select string_agg(left(coalesce(e.body_clean, e.body_text, ''), 1500), ' ') from (select * from emails e where e.conversation_id=c.id and e.direction='inbound' and not e.is_duplicate order by e.sent_at desc limit 3) e) as body
+		   from conversations c where c.org_id=$1 and c.subcategory is null and c.business_category is not null and not c.needs_analysis limit $2`,
+		[orgId, limit],
+	);
+	for (const r of rows) {
+		const sub = guessSubcategory(r.business_category, `${r.subject || ''}\n${r.body || ''}\n${r.summary || ''}`);
+		await q('update conversations set subcategory=$2 where id=$1 and subcategory is null', [r.id, sub]);
+	}
+	return rows.length;
 }
